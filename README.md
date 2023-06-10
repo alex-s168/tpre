@@ -10,7 +10,7 @@ JSON layouts:
 test-cases/*.json:
 
 {
-    "name": <name of suit the test case belongs to>,
+    "name": <name of suite the test case belongs to>,
     "strs": [ <strings to test against> ],
     "regexs": [ <regular expressions to test> ]
 }
