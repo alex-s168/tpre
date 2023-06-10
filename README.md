@@ -28,7 +28,9 @@ test-results/re2/*.json:
         ]
     ]
 ]
-with the [ <result ...> ] arrays being arrays of integers, with -1 meaning "no value", with arrays containing only -1's being replaced by []
+with the [ <result ...> ] arrays being arrays of integers,
+    with -1 meaning "no value",
+    with arrays containing only -1's being replaced by []
 ```
 
 RE2 version used:
