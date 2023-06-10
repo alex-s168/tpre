@@ -2,7 +2,7 @@
 
 Intended for the testing of regular expression engines.
 
-Extracted from the log output of the tests for the [RE2](https://github.com/google/re2) regex engine.
+Extracted from the log output of the tests accompanying the [RE2](https://github.com/google/re2) regex engine.
 
 JSON layouts:
 
