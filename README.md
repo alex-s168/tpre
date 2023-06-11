@@ -21,10 +21,10 @@ test-results/re2/*.json:
 [ for each of regexs
     [ for each of strs
         [
-            [ <result of re2, unanchored> ],
             [ <result of re2, anchored at start and end> ],
-            [ <result of re_longest, unanchored> ],
-            [ <result of re_longest, anchored at start and end> ]
+            [ <result of re2, unanchored> ],
+            [ <result of re_longest, anchored at start and end> ],
+            [ <result of re_longest, unanchored> ]
         ]
     ]
 ]
