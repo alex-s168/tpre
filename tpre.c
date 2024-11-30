@@ -5,6 +5,9 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <stdio.h>
+#include "allib/dynamic_list/dynamic_list.h"
+#include "allib/kallok/kallok.h"
+#define CREFLECT(args, ...) __VA_ARGS__
 
 typedef uint8_t group_id_t;
 typedef int16_t node_id_t;
@@ -155,10 +158,366 @@ void regex_match_print(re_match_t match, FILE* out)
     }
 }
 
+
+CREFLECT((),
+typedef enum {
+    Match,
+    MatchRange,
+    RepeatLazyLeast0,
+    RepeatLeast0,
+    RepeatLazyLeast1,
+    RepeatLeast1,
+    OrNot,
+    CaptureGroupOpen,
+    CaptureGroupOpenNoCapture,
+    CaptureGroupOpenNamed,
+    CaptureGroupClose,
+    OneOfOpen,
+    OneOfOpenInvert,
+    OneOfClose,
+    OrElse,
+    StartOfStr,
+} ReTkTy);
+extern const char * ReTkTy_str[];
+
+typedef struct {
+    ReTkTy ty;
+    union {
+        pattern_t match;
+        char group_name[20];
+        struct { char from, to; } range;
+    };
+} ReTk;
+
+void ReTk_dump(ReTk tk, FILE* out)
+{
+    fprintf(out, "%s", ReTkTy_str[tk.ty]);
+    if (tk.ty == Match) {
+        pattern_t pat = tk.match;
+        if (pat.is_special) fprintf(out, "(special: %u)", pat.val);
+        else fprintf(out, "(%c)", (char) pat.val);
+    } else if (tk.ty == CaptureGroupOpenNamed) {
+        fprintf(out, "(%s)", tk.group_name);
+    } else if (tk.ty == MatchRange) {
+        fprintf(out, "(%c-%c)", tk.range.from, tk.range.to);
+    }
+}
+
+static bool lex(ReTk* tkOut, char const* * reader)
+{
+    if (!**reader) return false;
+
+    if ((*reader)[1] == '-') {
+        tkOut->range.from = **reader;
+        (*reader)+=2;
+        tkOut->range.to = **reader;
+        (*reader)++;
+        tkOut->ty = MatchRange;
+        return true;
+    }
+
+    if (**reader == '.') {
+        (*reader)++;
+        tkOut->ty = Match;
+        tkOut->match = SP(SPECIAL_ANY);
+        return true;
+    }
+
+    if (**reader == '\\') {
+        (*reader)++;
+        char c = **reader;
+        (*reader)++;
+        pattern_t m;
+        switch (c) {
+            case 't': m = NO('\t'); break;
+            case 'r': m = NO('\r'); break;
+            case 'n': m = NO('\n'); break;
+            case 'f': m = NO('\f'); break;
+
+            case 's': m = SP(SPECIAL_SPACE); break;
+
+            default:  m = NO(c); break;
+        }
+        tkOut->ty = Match;
+        tkOut->match = m;
+        return true;
+    }
+
+    if (**reader == '*') {
+        (*reader)++;
+        if (**reader == '?') {
+            (*reader)++;
+            tkOut->ty = RepeatLazyLeast0;
+        } else {
+            tkOut->ty = RepeatLeast0;
+        }
+        return true;
+    }
+
+    if (**reader == '+') {
+        (*reader)++;
+        if (**reader == '?') {
+            (*reader)++;
+            tkOut->ty = RepeatLazyLeast1;
+        } else {
+            tkOut->ty = RepeatLeast1;
+        }
+        return true;
+    }
+
+    if (**reader == '?') {
+        (*reader)++;
+        tkOut->ty = OrNot;
+        return true;
+    }
+
+    if (**reader == '(') {
+        (*reader)++;
+        if (**reader == '?') {
+            (*reader)++;
+            if (**reader == ':') {
+                (*reader)++;
+                tkOut->ty = CaptureGroupOpenNoCapture;
+                return true;
+            }
+
+            if (**reader == '\'') {
+                (*reader)++;
+                const char * begin = *reader;
+                tkOut->ty = CaptureGroupOpenNamed;
+                for (; **reader && **reader != '\''; reader ++);
+                size_t len = *reader - begin;
+                if (**reader) (*reader)++;
+                if (len > 19) len = 19;
+                memcpy(tkOut->group_name, begin, len);
+                tkOut->group_name[len] = '\0';
+                return true;
+            }
+
+            return false;
+        }
+
+        tkOut->ty = CaptureGroupOpen;
+        return true;
+    }
+
+    if (**reader == ')') {
+        (*reader)++;
+        tkOut->ty = CaptureGroupClose;
+        return true;
+    }
+
+    if (**reader == '[') {
+        (*reader)++;
+        if (**reader == '^') {
+            (*reader)++;
+            tkOut->ty = OneOfOpenInvert;
+            return true;
+        }
+        tkOut->ty = OneOfOpen;
+        return true;
+    }
+
+    if (**reader == ']') {
+        (*reader)++;
+        tkOut->ty = OneOfClose;
+        return true;
+    }
+
+    if (**reader == '|') {
+        (*reader)++;
+        tkOut->ty = OrElse;
+        return true;
+    }
+
+    if (**reader == '^') {
+        (*reader)++;
+        tkOut->ty = StartOfStr;
+        return true;
+    }
+
+    if (**reader == '$') {
+        (*reader)++;
+        tkOut->ty = Match;
+        tkOut->match = SP(SPECIAL_END);
+        return true;
+    }
+
+    tkOut->match = NO(**reader);
+    (*reader)++;
+    tkOut->ty = Match;
+    return true;
+}
+
+static DynamicList TYPES(ReTk) lexe(const char * src)
+{
+    DynamicList out; DynamicList_init(&out, sizeof(ReTk), getLIBCAlloc(), 0);
+
+    ReTk tok;
+    const char* reader = src;
+    while (lex(&tok, &reader)) {
+        DynamicList_add(&out, &tok);
+    }
+
+    if (*reader) {
+        fprintf(stderr, "error at arround %zu\n", reader - src);
+        exit(1);
+    }
+
+    return out;
+}
+
+CREFLECT((remove_prefix(Node)),
+typedef enum {
+    NodeMatch,
+    NodeChain,
+    NodeOr,
+    NodeMaybe,
+    NodeRepeatLeast0,
+    NodeRepeatLeast1,
+    NodeLazyRepeatLeast0,
+    NodeLazyRepeatLeast1,
+    NodeCaptureGroup,
+    NodeNamedCaptureGroup,
+} NodeKind);
+
+typedef struct Node Node;
+struct Node {
+    NodeKind kind;
+    union {
+        pattern_t match;
+
+        struct {
+            Node* a;
+            Node* b;
+        } chain;
+
+        struct {
+            Node* a;
+            Node* b;
+        } or;
+
+        Node* maybe;
+
+        Node* repeat;
+
+        Node* capture;
+
+        struct {
+            char name[20];
+            Node* group;
+        } named_capture;
+    };
+};
+
+static void Node_children(Node* nd, Node* childrenOut[2]) {
+    childrenOut[0] = NULL;
+    childrenOut[1] = NULL;
+
+    switch (nd->kind) {
+        case NodeMatch:
+            break;
+
+        case NodeChain:
+            childrenOut[0] = nd->chain.a;
+            childrenOut[1] = nd->chain.b;
+            break;
+
+        case NodeOr:
+            childrenOut[0] = nd->or.a;
+            childrenOut[1] = nd->or.b;
+            break;
+
+        case NodeMaybe:
+            childrenOut[0] = nd->maybe;
+            break;
+
+        case NodeRepeatLeast0:
+        case NodeRepeatLeast1:
+        case NodeLazyRepeatLeast0:
+        case NodeLazyRepeatLeast1:
+            childrenOut[0] = nd->repeat;
+            break;
+
+        case NodeCaptureGroup:
+            childrenOut[0] = nd->capture;
+            break;
+
+        case NodeNamedCaptureGroup:
+            childrenOut[0] = nd->named_capture.group;
+            break;
+    }
+}
+
+static void Node_free(Node* node)
+{
+    if (!node) return;
+    Node* children[2];
+    Node_children(node, children);
+    Node_free(children[0]);
+    Node_free(children[1]);
+    free(node);
+}
+
+typedef struct {
+    DynamicList TYPES(ReTk) tokens;
+} TkL;
+
+static size_t TkL_len(TkL const* li) {
+    return li->tokens.fixed.len;
+}
+
+static bool TkL_peek(ReTk* out, TkL* li) {
+    if (TkL_len(li) == 0) return false;
+    *out = * (ReTk*) FixedList_get(li->tokens.fixed, 0);
+    return true;
+}
+
+static ReTk TkL_get(TkL const* li, size_t i) {
+    return * (ReTk*) FixedList_get(li->tokens.fixed, i);
+}
+
+static bool TkL_take(ReTk* out, TkL* li) {
+    if (TkL_len(li) == 0) return false;
+    *out = TkL_get(li, 0);
+    DynamicList_removeAt(&li->tokens, 0);
+    return true;
+}
+
+static void TkL_free(TkL* li) {
+    DynamicList_clear(&li->tokens);
+}
+
+static TkL TkL_copy_view(TkL const* li, size_t first, size_t num) {
+    TkL out;
+    DynamicList_init(&out.tokens, sizeof(ReTk), getLIBCAlloc(), num);
+    for (size_t i = 0; i < num; i ++) {
+        ReTk t = TkL_get(li, i + first);
+        DynamicList_add(&out.tokens, &t);
+    }
+    return out;
+}
+
+static Node* parse(TkL* tokens)
+{
+    if (TkL_len(tokens) == 1) {
+        ReTk t = TkL_get(tokens, 0);
+        switch (t.ty)
+        {
+
+        }
+    }
+
+    Node* a = parse(tokens);
+
+}
+
 int main()
 {
-    // \s*?(red|green|blue)?\s*?(car|train)\s*?
+    TkL tokens;
+    tokens.tokens = lexe("\\s*?(red|green|blue)?\\s*?(car|train)\\s*?");
 
+    /*
     regex_t re;
     re.i_ok  = (node_id_t[]) { 4,5,6,0, 7,8,9,15,10,11,12,15,15,15,16,17,18,19,20,23,21,23,-2,23 };
     re.i_err = (node_id_t[]) { 1,2,3,15,1,2,3,1, 2, 3, 2, 3, 2, -1,13,14,13,14,13,14,13,13,-1,22 };
@@ -188,4 +547,13 @@ int main()
     m = regex_match(&re, " train ");
     regex_match_print(m, stdout);
     regex_match_free(m);
+
+    m = regex_match(&re, " plane ");
+    regex_match_print(m, stdout);
+    regex_match_free(m);
+
+    m = regex_match(&re, " yellow train ");
+    regex_match_print(m, stdout);
+    regex_match_free(m);
+    */
 }
