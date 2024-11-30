@@ -1,4 +1,3 @@
-#include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +7,8 @@
 #include "allib/dynamic_list/dynamic_list.h"
 #include "allib/kallok/kallok.h"
 #define CREFLECT(args, ...) __VA_ARGS__
+
+#define STORE_GROUPS 0
 
 typedef uint8_t group_id_t;
 typedef int16_t node_id_t;
@@ -65,27 +66,33 @@ static node_id_t regex_add_node(
 
 typedef struct {
     bool found;
+#if STORE_GROUPS
     size_t ngroups;
     struct {
         size_t len;
         /** null-terminated */
         char * str;
     } * groups;
+#endif
 } re_match_t;
 
 void regex_match_free(re_match_t match)
 {
+#if STORE_GROUPS
     for (size_t i = 0; i < match.ngroups; i ++)
         free(match.groups[i].str);
     free(match.groups);
+#endif
 }
 
+#if STORE_GROUPS
 static void regex_match_group_put(re_match_t* match, group_id_t group, char c)
 {
     if (group != 0) regex_match_group_put(match, 0, c);
     match->groups[group].str = realloc(match->groups[group].str, sizeof(char) * (++ match->groups[group].len));
     strcat(match->groups[group].str, (char[]) { c, '\0' });
 }
+#endif
 
 static bool pattern_match(pattern_t pat, char src)
 {
@@ -98,14 +105,12 @@ static bool pattern_match(pattern_t pat, char src)
             return true;
 
         case SPECIAL_SPACE:
-            return isspace(src);
+            return src == ' ' || src == '\n' || src == '\t' || src == '\r';
 
         case SPECIAL_END:
             return src == '\0';
 
         default:
-            assert(false);
-            exit(1);
             return false;
     }
 }
@@ -113,45 +118,55 @@ static bool pattern_match(pattern_t pat, char src)
 re_match_t regex_match(regex_t const* re, const char * str)
 {
     re_match_t match;
+#if STORE_GROUPS
     match.ngroups = re->max_group + 1;
     match.groups = malloc(sizeof(*match.groups) * match.ngroups);
     for (size_t i = 0; i < match.ngroups; i ++) {
         match.groups[i].len = 1;
         match.groups[i].str = calloc(1,1);
     }
+#endif
 
     node_id_t cursor = re->first_node;
     while (cursor >= 0)
     {
         if (pattern_match(re->i_pat[cursor], *str)) {
+#if STORE_GROUPS
             regex_match_group_put(&match, re->i_group[cursor], *str);
+#endif
             cursor = re->i_ok[cursor];
             if (*str) str ++;
         } else {
             backtrack_t bt = re->i_backtrack[cursor];
             str -= bt;
+#if STORE_GROUPS
             group_id_t g = re->i_group[cursor];
             match.groups[g].len -= bt;
             match.groups[g].str[match.groups[g].len - 1] = '\0';
+#endif
             cursor = re->i_err[cursor];
         }
     }
 
     match.found = cursor == NODE_DONE;
 
+#if STORE_GROUPS
     // not including nt
     for (size_t i = 0; i < match.ngroups; i ++)
         match.groups[i].len --;
+#endif
     return match;
 }
 
 void regex_match_print(re_match_t match, FILE* out)
 {
     if (match.found) {
-        fprintf(out, "matches:\n");
+        fprintf(out, "does match\n");
+#if STORE_GROUPS
         for (size_t i = 0; i < match.ngroups; i ++) {
             fprintf(out, "  group %zu: %s\n", i, match.groups[i].str);
         }
+#endif
     }
     else {
         fprintf(out, "does not match\n");
@@ -498,26 +513,24 @@ static TkL TkL_copy_view(TkL const* li, size_t first, size_t num) {
     return out;
 }
 
-static Node* parse(TkL* tokens)
-{
-    if (TkL_len(tokens) == 1) {
-        ReTk t = TkL_get(tokens, 0);
-        switch (t.ty)
-        {
-
-        }
-    }
-
-    Node* a = parse(tokens);
-
-}
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
+#include <time.h>
 
 int main()
 {
-    TkL tokens;
-    tokens.tokens = lexe("\\s*?(red|green|blue)?\\s*?(car|train)\\s*?");
+    const char * resrc = "\\s*?(red|green|blue)?\\s*?(car|train)\\s*?";
 
-    /*
+    int errnu;
+    PCRE2_SIZE errof;
+    pcre2_code* pre = pcre2_compile((PCRE2_SPTR) resrc, PCRE2_ZERO_TERMINATED, PCRE2_NO_START_OPTIMIZE, &errnu, &errof, NULL);
+    if (pre == NULL) {
+        PCRE2_UCHAR buffer[256];
+        pcre2_get_error_message(errnu, buffer, sizeof(buffer));
+        printf("PCRE2 compilation failed at offset %d: %s\n", (int)errof, buffer);
+        return 1;
+    }
+
     regex_t re;
     re.i_ok  = (node_id_t[]) { 4,5,6,0, 7,8,9,15,10,11,12,15,15,15,16,17,18,19,20,23,21,23,-2,23 };
     re.i_err = (node_id_t[]) { 1,2,3,15,1,2,3,1, 2, 3, 2, 3, 2, -1,13,14,13,14,13,14,13,13,-1,22 };
@@ -534,26 +547,22 @@ int main()
     re.max_group = 2;
     re.num_nodes = 24;
 
-    re_match_t m;
+    size_t niter = 100000000;
 
-    m = regex_match(&re, " green  car ");
-    regex_match_print(m, stdout);
-    regex_match_free(m);
+    const char * str;
+    double start, end;
 
-    m = regex_match(&re, " bluetrain ");
-    regex_match_print(m, stdout);
-    regex_match_free(m);
-
-    m = regex_match(&re, " train ");
-    regex_match_print(m, stdout);
-    regex_match_free(m);
-
-    m = regex_match(&re, " plane ");
-    regex_match_print(m, stdout);
-    regex_match_free(m);
-
-    m = regex_match(&re, " yellow train ");
-    regex_match_print(m, stdout);
-    regex_match_free(m);
-    */
+    str = " green car ";
+    start = (double) clock() / CLOCKS_PER_SEC;
+    for (size_t i = 0; i < niter; i ++)
+        pcre2_match(pre, (PCRE2_SPTR) str, strlen(str), 0, 0, NULL, NULL);
+    end = (double) clock() / CLOCKS_PER_SEC;
+    printf("pcre2 took %f ms\n", (end - start) / 1000);
+    start = (double) clock() / CLOCKS_PER_SEC;
+    for (size_t i = 0; i < niter; i ++) {
+        re_match_t volatile match = regex_match(&re, str);
+        regex_match_free(match);
+    }
+    end = (double) clock() / CLOCKS_PER_SEC;
+    printf("this lib took %f ms\n", (end - start) / 1000);
 }
