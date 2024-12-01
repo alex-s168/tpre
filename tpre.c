@@ -1,3 +1,4 @@
+#include <hs/hs_runtime.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,7 +9,7 @@
 #include "allib/kallok/kallok.h"
 #define CREFLECT(args, ...) __VA_ARGS__
 
-#define STORE_GROUPS 0
+#define STORE_GROUPS  (1)
 
 typedef uint8_t group_id_t;
 typedef int16_t node_id_t;
@@ -68,11 +69,8 @@ typedef struct {
     bool found;
 #if STORE_GROUPS
     size_t ngroups;
-    struct {
-        size_t len;
-        /** null-terminated */
-        char * str;
-    } * groups;
+    /** will have null terminators ONLY IF LEN > 0 */
+    DynamicList TYPES(char) * groups;
 #endif
 } re_match_t;
 
@@ -80,7 +78,7 @@ void regex_match_free(re_match_t match)
 {
 #if STORE_GROUPS
     for (size_t i = 0; i < match.ngroups; i ++)
-        free(match.groups[i].str);
+        DynamicList_clear(&match.groups[i]);
     free(match.groups);
 #endif
 }
@@ -88,9 +86,8 @@ void regex_match_free(re_match_t match)
 #if STORE_GROUPS
 static void regex_match_group_put(re_match_t* match, group_id_t group, char c)
 {
-    if (group != 0) regex_match_group_put(match, 0, c);
-    match->groups[group].str = realloc(match->groups[group].str, sizeof(char) * (++ match->groups[group].len));
-    strcat(match->groups[group].str, (char[]) { c, '\0' });
+    if (group == 0) return;
+    DynamicList_add(&match->groups[group], &c);
 }
 #endif
 
@@ -122,8 +119,7 @@ re_match_t regex_match(regex_t const* re, const char * str)
     match.ngroups = re->max_group + 1;
     match.groups = malloc(sizeof(*match.groups) * match.ngroups);
     for (size_t i = 0; i < match.ngroups; i ++) {
-        match.groups[i].len = 1;
-        match.groups[i].str = calloc(1,1);
+        DynamicList_init(&match.groups[i], sizeof(char), getLIBCAlloc(), 0);
     }
 #endif
 
@@ -141,8 +137,11 @@ re_match_t regex_match(regex_t const* re, const char * str)
             str -= bt;
 #if STORE_GROUPS
             group_id_t g = re->i_group[cursor];
-            match.groups[g].len -= bt;
-            match.groups[g].str[match.groups[g].len - 1] = '\0';
+            if (bt > 0) {
+                size_t glen = match.groups[g].fixed.len;
+                if (match.groups[g].fixed.len >= bt)
+                    match.groups[g].fixed.len -= bt;
+            }
 #endif
             cursor = re->i_err[cursor];
         }
@@ -151,10 +150,11 @@ re_match_t regex_match(regex_t const* re, const char * str)
     match.found = cursor == NODE_DONE;
 
 #if STORE_GROUPS
-    // not including nt
     for (size_t i = 0; i < match.ngroups; i ++)
-        match.groups[i].len --;
+        if (match.groups[i].fixed.len > 0)
+            DynamicList_add(&match.groups[i], (char[]) { '\0' });
 #endif
+
     return match;
 }
 
@@ -164,7 +164,7 @@ void regex_match_print(re_match_t match, FILE* out)
         fprintf(out, "does match\n");
 #if STORE_GROUPS
         for (size_t i = 0; i < match.ngroups; i ++) {
-            fprintf(out, "  group %zu: %s\n", i, match.groups[i].str);
+            fprintf(out, "  group %zu: %s\n", i, match.groups[i].fixed.len > 0 ? ((const char *) match.groups[i].fixed.data) : "");
         }
 #endif
     }
@@ -521,16 +521,6 @@ int main()
 {
     const char * resrc = "\\s*?(red|green|blue)?\\s*?(car|train)\\s*?";
 
-    int errnu;
-    PCRE2_SIZE errof;
-    pcre2_code* pre = pcre2_compile((PCRE2_SPTR) resrc, PCRE2_ZERO_TERMINATED, PCRE2_NO_START_OPTIMIZE, &errnu, &errof, NULL);
-    if (pre == NULL) {
-        PCRE2_UCHAR buffer[256];
-        pcre2_get_error_message(errnu, buffer, sizeof(buffer));
-        printf("PCRE2 compilation failed at offset %d: %s\n", (int)errof, buffer);
-        return 1;
-    }
-
     regex_t re;
     re.i_ok  = (node_id_t[]) { 4,5,6,0, 7,8,9,15,10,11,12,15,15,15,16,17,18,19,20,23,21,23,-2,23 };
     re.i_err = (node_id_t[]) { 1,2,3,15,1,2,3,1, 2, 3, 2, 3, 2, -1,13,14,13,14,13,14,13,13,-1,22 };
@@ -547,22 +537,80 @@ int main()
     re.max_group = 2;
     re.num_nodes = 24;
 
-    size_t niter = 100000000;
+    {
+        re_match_t match = regex_match(&re, " green car ");
+        regex_match_print(match, stdout);
+        regex_match_free(match);
+    }
+
+    size_t niter = 1000000;
 
     const char * str;
     double start, end;
 
     str = " green car ";
-    start = (double) clock() / CLOCKS_PER_SEC;
-    for (size_t i = 0; i < niter; i ++)
-        pcre2_match(pre, (PCRE2_SPTR) str, strlen(str), 0, 0, NULL, NULL);
-    end = (double) clock() / CLOCKS_PER_SEC;
-    printf("pcre2 took %f ms\n", (end - start) / 1000);
-    start = (double) clock() / CLOCKS_PER_SEC;
-    for (size_t i = 0; i < niter; i ++) {
-        re_match_t volatile match = regex_match(&re, str);
-        regex_match_free(match);
+    size_t strl = strlen(str);
+
+    {
+        int errnu;
+        PCRE2_SIZE errof;
+        pcre2_code* pre = pcre2_compile((PCRE2_SPTR) resrc, PCRE2_ZERO_TERMINATED, PCRE2_ANCHORED, &errnu, &errof, NULL);
+        if (pre == NULL) {
+            PCRE2_UCHAR buffer[256];
+            pcre2_get_error_message(errnu, buffer, sizeof(buffer));
+            printf("PCRE2 compilation failed at offset %d: %s\n", (int)errof, buffer);
+            return 1;
+        }
+
+        start = (double) clock() / CLOCKS_PER_SEC;
+        for (size_t i = 0; i < niter; i ++) {
+            pcre2_match_data *volatile match_data = pcre2_match_data_create_from_pattern(pre, NULL);
+            if ( pcre2_match(pre, (PCRE2_SPTR) str, strl, 0, PCRE2_NO_JIT | PCRE2_ANCHORED, match_data, NULL) < 1)
+                return 1;
+            pcre2_match_data_free(match_data);
+        }
+        end = (double) clock() / CLOCKS_PER_SEC;
+        printf("pcre2 took %f ms\n", (end - start) / 1000);
     }
-    end = (double) clock() / CLOCKS_PER_SEC;
-    printf("this lib took %f ms\n", (end - start) / 1000);
+
+    {
+        int errnu;
+        PCRE2_SIZE errof;
+        pcre2_code* pre = pcre2_compile((PCRE2_SPTR) resrc, PCRE2_ZERO_TERMINATED, PCRE2_ANCHORED, &errnu, &errof, NULL);
+        if (pre == NULL) {
+            PCRE2_UCHAR buffer[256];
+            pcre2_get_error_message(errnu, buffer, sizeof(buffer));
+            printf("PCRE2 compilation failed at offset %d: %s\n", (int)errof, buffer);
+            return 1;
+        }
+        pcre2_match_data *match_data;
+        pcre2_match_context *mcontext;
+        pcre2_jit_stack *jit_stack;
+        int rc = pcre2_jit_compile(pre, PCRE2_JIT_COMPLETE);
+        mcontext = pcre2_match_context_create(NULL);
+        jit_stack = pcre2_jit_stack_create(32*1024, 512*1024, NULL);
+        pcre2_jit_stack_assign(mcontext, NULL, jit_stack);
+
+        start = (double) clock() / CLOCKS_PER_SEC;
+        for (size_t i = 0; i < niter; i ++) {
+            pcre2_match_data *volatile match_data = pcre2_match_data_create_from_pattern(pre, NULL);
+            rc = pcre2_jit_match(pre, (PCRE2_SPTR) str, strl, 0, PCRE2_ANCHORED, match_data, NULL);
+            if (rc < 1) return 1;
+            PCRE2_SIZE * volatile ovector = pcre2_get_ovector_pointer(match_data);
+            (void) ovector;
+            pcre2_match_data_free(match_data);
+        }
+        end = (double) clock() / CLOCKS_PER_SEC;
+        printf("pcre2 (jit) took %f ms\n", (end - start) / 1000);
+    }
+
+    {
+        start = (double) clock() / CLOCKS_PER_SEC;
+        for (size_t i = 0; i < niter; i ++) {
+            re_match_t volatile match = regex_match(&re, str);
+            regex_match_free(match);
+        }
+        end = (double) clock() / CLOCKS_PER_SEC;
+        printf("this lib took %f ms\n", (end - start) / 1000);
+    }
 }
