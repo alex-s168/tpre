@@ -343,13 +343,16 @@ typedef enum {
     NodeChain,
     NodeOr,
     NodeMaybe,
+    NodeNot,
     NodeRepeatLeast0,
     NodeRepeatLeast1,
     NodeLazyRepeatLeast0,
     NodeLazyRepeatLeast1,
+    NodeJustGroup,
     NodeCaptureGroup,
     NodeNamedCaptureGroup,
 } NodeKind);
+extern const char * NodeKind_str[];
 
 typedef struct Node Node;
 struct Node {
@@ -367,11 +370,11 @@ struct Node {
             Node* b;
         } or;
 
+        Node* just_group;
         Node* maybe;
-
         Node* repeat;
-
         Node* capture;
+        Node* not;
 
         struct {
             char name[20];
@@ -393,6 +396,10 @@ static void Node_children(Node* nd, Node* childrenOut[2]) {
             childrenOut[1] = nd->chain.b;
             break;
 
+        case NodeNot:
+            childrenOut[0] = nd->not;
+            break;
+
         case NodeOr:
             childrenOut[0] = nd->or.a;
             childrenOut[1] = nd->or.b;
@@ -407,6 +414,10 @@ static void Node_children(Node* nd, Node* childrenOut[2]) {
         case NodeLazyRepeatLeast0:
         case NodeLazyRepeatLeast1:
             childrenOut[0] = nd->repeat;
+            break;
+
+        case NodeJustGroup:
+            childrenOut[0] = nd->just_group;
             break;
 
         case NodeCaptureGroup:
@@ -427,6 +438,28 @@ static void Node_free(Node* node)
     Node_free(children[0]);
     Node_free(children[1]);
     free(node);
+}
+
+static void Node_print(Node* node, FILE* file, size_t indent)
+{
+    if (!node) return;
+    for (size_t i = 0; i < indent * 2; i ++)
+        fputc(' ', file);
+    fprintf(file, "%s ", NodeKind_str[node->kind]);
+    switch (node->kind) {
+        case Match: {
+            tpre_pattern_t pat = node->match;
+            if (pat.is_special) fprintf(file, "(special: %u)", pat.val);
+            else fprintf(file, "(%c)", (char) pat.val);
+        } break;
+
+        default: break;
+    }
+    fputc('\n', file);
+    Node* children[2];
+    Node_children(node, children);
+    Node_print(children[0], file, indent + 1);
+    Node_print(children[1], file, indent + 1);
 }
 
 typedef struct {
@@ -466,4 +499,233 @@ static TkL TkL_copy_view(TkL const* li, size_t first, size_t num) {
         DynamicList_add(&out.tokens, &t);
     }
     return out;
+}
+
+static bool isCaptureGroupOpen(ReTkTy ty) {
+    return ty == CaptureGroupOpen ||
+           ty == CaptureGroupOpenNamed ||
+           ty == CaptureGroupOpenNoCapture;
+}
+
+static bool isOneOfOpen(ReTkTy ty) {
+    return ty == OneOfOpen ||
+           ty == OneOfOpenInvert;
+}
+
+static bool isPostfix(ReTkTy ty) {
+    return ty == OrNot ||
+           ty == RepeatLeast0 ||
+           ty == RepeatLeast1 ||
+           ty == RepeatLazyLeast0 ||
+           ty == RepeatLazyLeast1;
+}
+
+static Node* maybeChain(Node* a, Node* b) {
+    if (b == NULL) return a;
+
+    Node* n = malloc(sizeof(Node));
+    n->kind = NodeChain;
+    n->chain.a = a;
+    n->chain.b = b;
+    return n;
+}
+
+static Node* oneOf(Node** nodes, size_t len) {
+    if (len == 0) return NULL;
+    if (len == 1) return nodes[0];
+    Node* rhs = oneOf(nodes + 1, len - 1);
+    Node* self = malloc(sizeof(Node));
+    self->kind = NodeOr;
+    self->or.a = nodes[0];
+    self->or.b = rhs;
+    return self;
+}
+
+static Node* genMatch(tpre_pattern_t pat) {
+    Node* self = malloc(sizeof(Node));
+    self->kind = NodeMatch;
+    self->match = pat;
+    return self;
+}
+
+static void replaceChainsWithOrs(Node* node) {
+    if (node == NULL) return;
+    if (node->kind != NodeChain) return;
+    Node tmp = *node;
+    node->kind = NodeOr;
+    node->or.a = tmp.chain.a;
+    node->or.b = tmp.chain.b;
+    Node* children[2];
+    Node_children(node, children);
+    replaceChainsWithOrs(children[0]);
+    replaceChainsWithOrs(children[1]);
+}
+
+static Node* parse(TkL toks) {
+    if (TkL_len(&toks) == 0) return NULL;
+
+    // weird code for postfix operators
+    {
+        DynamicList TYPES(size_t) postfixes;
+        DynamicList_init(&postfixes, sizeof(size_t), getLIBCAlloc(), 0);
+
+        size_t nesting = 0;
+        for (size_t i = 0; i < TkL_len(&toks); i ++) {
+            ReTkTy t = TkL_get(&toks, i).ty;
+            if (isCaptureGroupOpen(t)) nesting ++;
+            else if (t == CaptureGroupClose) nesting --;
+            else if (isOneOfOpen(t)) nesting ++;
+            else if (t == OneOfClose) nesting --;
+
+            if (nesting == 0 && isPostfix(t)) {
+                DynamicList_add(&postfixes, &i);
+            }
+        }
+
+        Node* fold = NULL;
+        while (postfixes.fixed.len > 0) {
+            size_t idx = * (size_t*) FixedList_get(postfixes.fixed, 0);
+            DynamicList_removeAt(&postfixes, 0);
+
+            ReTk op = TkL_get(&toks, idx);
+            Node* lhs = parse(TkL_copy_view(&toks, 0, idx));
+
+            DynamicList_removeRange(&toks.tokens, 0, idx);
+            for (size_t i = 0; i < postfixes.fixed.len; i ++) {
+                *((size_t *) FixedList_get(postfixes.fixed, i)) -= idx + 1;
+            }
+
+            if (fold)
+                lhs = maybeChain(fold, lhs);
+
+            Node* self = malloc(sizeof(Node));
+            if (op.ty == OrNot) {
+                self->kind = NodeMaybe;
+                self->maybe = lhs;
+            } else if (op.ty == RepeatLeast0) {
+                self->kind = NodeRepeatLeast0;
+                self->repeat = lhs;
+            } else if (op.ty == RepeatLeast1) {
+                self->kind = NodeRepeatLeast1;
+                self->repeat = lhs;
+            } else if (op.ty == RepeatLazyLeast0) {
+                self->kind = NodeLazyRepeatLeast0;
+                self->repeat = lhs;
+            } else if (op.ty == RepeatLazyLeast1) {
+                self->kind = NodeLazyRepeatLeast1;
+                self->repeat = lhs;
+            }
+
+            fold = self;
+        }
+
+        if (fold != NULL) {
+            return maybeChain(fold, parse(toks));
+        }
+    }
+
+    ReTkTy firstTy = TkL_get(&toks, 0).ty;
+
+    if (isCaptureGroupOpen(firstTy)) {
+        size_t nesting = 0;
+        size_t i = 0;
+        for (; i < TkL_len(&toks); i ++) {
+            ReTkTy t = TkL_get(&toks, i).ty;
+            if (isCaptureGroupOpen(t)) nesting ++;
+            else if (t == CaptureGroupClose) {
+                nesting --;
+                if (nesting == 0) break;
+            }
+        }
+
+        Node* inner = parse(TkL_copy_view(&toks, 1, i-1));
+        Node* rem = parse(TkL_copy_view(&toks, i+1, TkL_len(&toks)-i-1));
+
+        Node* self = malloc(sizeof(Node));
+        if (firstTy == CaptureGroupOpen) {
+            self->kind = NodeCaptureGroup;
+            self->capture = inner;
+        } else if (firstTy == CaptureGroupOpenNoCapture) {
+            self->kind = NodeJustGroup;
+            self->just_group = inner;
+        } else {
+            self->kind = NodeNamedCaptureGroup;
+            self->named_capture.group = inner;
+            memcpy(self->named_capture.name, TkL_get(&toks, 0).group_name, 20);
+        }
+
+        TkL_free(&toks);
+        return maybeChain(self, rem);
+    }
+
+    if (firstTy == Match) {
+        Node* rem = parse(TkL_copy_view(&toks, 1, TkL_len(&toks)-1));
+        Node* self = genMatch(TkL_get(&toks, 0).match);
+
+        TkL_free(&toks);
+        return maybeChain(self, rem);
+    }
+
+    if (firstTy == MatchRange) {
+        Node* rem = parse(TkL_copy_view(&toks, 1, TkL_len(&toks)-1));
+
+        char from = TkL_get(&toks, 0).range.from;
+        char to = TkL_get(&toks, 0).range.to;
+        if (from > to) {
+            char t = from;
+            from = to;
+            to = t;
+        }
+
+        size_t len = to - from + 1;
+        Node* nodes[len];
+        for (size_t i = 0; i < len; i ++)
+            nodes[i] = genMatch(NO(from + i));
+        Node* self = oneOf(nodes, len);
+
+        TkL_free(&toks);
+        return maybeChain(self, rem);
+    }
+
+    if (isOneOfOpen(firstTy)) {
+        size_t nesting = 0;
+        size_t i = 0;
+        for (; i < TkL_len(&toks); i ++) {
+            ReTkTy t = TkL_get(&toks, i).ty;
+            if (isOneOfOpen(t)) nesting ++;
+            else if (t == OneOfClose) {
+                nesting --;
+                if (nesting == 0) break;
+            }
+        }
+
+        Node* self = parse(TkL_copy_view(&toks, 1, i-1));
+        Node* rem = parse(TkL_copy_view(&toks, i+1, TkL_len(&toks)-i-1));
+        TkL_free(&toks);
+
+        replaceChainsWithOrs(self);
+        if (firstTy == OneOfOpenInvert) {
+            Node* new = malloc(sizeof(Node));
+            new->kind = NodeNot;
+            new->not = self;
+            self = new;
+        }
+
+        return maybeChain(self, rem);
+    }
+
+/*
+    OrElse,
+    StartOfStr,
+*/
+
+    TkL_free(&toks);
+    assert(false);
+    return NULL;
+}
+
+int main() {
+    TkL li; li.tokens = lexe("ab(cd.*)?[a-c]");
+    Node* nd = parse(li);
+    Node_print(nd, stdout, 0);
 }
