@@ -942,45 +942,31 @@ static void fix_2(Node* node) {
     Node* children[2];
     Node_children(node, children);
 
-    // TODO: rewrite to only take single Or node into account (fixes a lot of problems) and also handle case if both or nodes contain identical nodes
-    if (node->kind == NodeOr) {
-        DynamicList TYPES(Node*) cases;
-        DynamicList_init(&cases, sizeof(Node), getLIBCAlloc(), 8);
-        or_cases(node, &cases);
-
-        Node* inner[cases.fixed.len];
-        for (size_t i = 0; i < cases.fixed.len; i ++)
-            inner[i] = last_left_chain(*(Node**)FixedList_get(cases.fixed, i));
-
-        bool eq = true;
-        for (size_t i = 1; i < cases.fixed.len; i ++) {
-            if (!Node_eq(inner[i]->chain.a, inner[0]->chain.a)) {
-                eq = false;
-                break;
-            }
-        }
-
-        if (eq) {
-            Node* new_prefix = inner[0]->chain.a;
-            inner[0]->chain.a = NULL;
-            // remove prefix from inner
-            for (size_t i = 0; i < cases.fixed.len; i ++) {
-                free(inner[i]->chain.a);
-                memcpy(inner[i], inner[i]->chain.b, sizeof(Node));
-            }
-            // chain
-            Node* right = Node_alloc();
-            memcpy(right, node, sizeof(Node));
-            node->kind = NodeChain;
-            node->chain.a = new_prefix;
-            node->chain.b = right;
-        }
-
-        DynamicList_clear(&cases);
-    }
-
     fix_2(children[0]);
     fix_2(children[1]);
+
+    if (node->kind == NodeOr) {
+        Node* a = node->or.a;
+        Node* b = node->or.b;
+
+        if (a->kind == NodeChain && b->kind == NodeChain) {
+            a = last_left_chain(a);
+            b = last_left_chain(b);
+
+            if (Node_eq(a->chain.a, b->chain.a)) {
+                Node* prefix = a->chain.a;
+                free(b->chain.a);
+                memcpy(a, a->chain.b, sizeof(Node));
+                memcpy(b, b->chain.b, sizeof(Node));
+
+                Node* right = Node_alloc();
+                memcpy(right, node, sizeof(Node));
+                node->kind = NodeChain;
+                node->chain.a = prefix;
+                node->chain.b = right;
+            }
+        }
+    }
 }
 
 // TODO: this will break the enine: a*?b|ac
