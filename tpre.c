@@ -341,6 +341,7 @@ static DynamicList TYPES(ReTk) lexe(const char * src)
 CREFLECT((remove_prefix(Node)),
 typedef enum {
     NodeMatch,
+    NodeStartOfStr,
     NodeChain,
     NodeOr,
     NodeMaybe,
@@ -395,6 +396,7 @@ static void Node_children(Node* nd, Node* childrenOut[2]) {
 
     switch (nd->kind) {
         case NodeMatch:
+        case NodeStartOfStr:
             break;
 
         case NodeChain:
@@ -468,6 +470,50 @@ static void Node_print(Node* node, FILE* file, size_t indent, bool print_grps)
     Node_children(node, children);
     Node_print(children[0], file, indent + 1, print_grps);
     Node_print(children[1], file, indent + 1, print_grps);
+}
+
+static bool Node_eq(Node* a, Node* b) {
+    if (a->kind != b->kind) return false;
+    if (a->group != b->group) return false;
+
+    switch (a->kind) {
+        case NodeMatch:
+            return a->match.is_special == b->match.is_special &&
+                a->match.val == b->match.val;
+
+        case NodeStartOfStr:
+            return true;
+
+        case NodeChain:
+            return Node_eq(a->chain.a, b->chain.a)
+                && Node_eq(a->chain.b, b->chain.b);
+
+        case NodeOr:
+            return Node_eq(a->or.a, b->or.a)
+                && Node_eq(a->or.b, b->or.b);
+
+        case NodeMaybe:
+            return Node_eq(a->maybe, b->maybe);
+        
+        case NodeNot:
+            return Node_eq(a->not, b->not);
+
+        case NodeRepeatLeast0:
+        case NodeRepeatLeast1:
+        case NodeLazyRepeatLeast0:
+        case NodeLazyRepeatLeast1:
+            return Node_eq(a->repeat, b->repeat);
+
+        case NodeJustGroup:
+            return Node_eq(a->just_group, b->just_group);
+
+        case NodeCaptureGroup:
+            return Node_eq(a->capture, b->capture);
+
+        case NodeNamedCaptureGroup:
+            return Node_eq(a->named_capture.group, b->named_capture.group) &&
+                !strcmp(a->named_capture.name, b->named_capture.name);
+    }
 }
 
 typedef struct {
@@ -724,6 +770,15 @@ static Node* parse(TkL toks) {
         return maybeChain(self, rem);
     }
 
+    if (firstTy == StartOfStr) {
+        Node* rem = parse(TkL_copy_view(&toks, 1, TkL_len(&toks)-1));
+        Node* self = Node_alloc();
+        self->kind = NodeStartOfStr;
+
+        TkL_free(&toks);
+        return maybeChain(self, rem);
+    }
+
     if (firstTy == MatchRange) {
         Node* rem = parse(TkL_copy_view(&toks, 1, TkL_len(&toks)-1));
 
@@ -772,12 +827,6 @@ static Node* parse(TkL toks) {
         return maybeChain(self, rem);
     }
 
-/*
- * TODO:
-    OrElse,
-    StartOfStr,
-*/
-
     TkL_free(&toks);
     assert(false);
     return NULL;
@@ -806,6 +855,12 @@ static Node* find_trough_rep(Node* node, NodeKind what) {
         default:
             return NULL;
     }
+}
+
+static Node* last_left_chain(Node* node) {
+    assert(node->kind == NodeChain);
+    if (node->chain.a->kind == NodeChain) return last_left_chain(node->chain.a);
+    return node;
 }
 
 static void verify(Node* nd) {
@@ -848,7 +903,7 @@ static void groups(Node* nd, tpre_groupid_t group, tpre_groupid_t* global_next_g
     groups(children[1], group, global_next_group_id);
 }
 
-// move all code chained to or into all or cases if any or case contains repetition
+/** move all code chained to or into all or cases if any or case contains repetition */
 static void fix_1(Node* node) {
     if (node == NULL) return;
     Node* children[2];
@@ -881,10 +936,57 @@ static void fix_1(Node* node) {
     fix_1(children[1]);
 }
 
-// TODO: GROUPS ARE GETTING BROKEN WHEN MOVING CHAIN INSIDE OR CASES! FIX BY STORING GROUP ID IN NODE AND DO THAT BEFROE FIX1
+/** move duplicate code in beginning of or cases to befre the or; required because otherwise will break engine */
+static void fix_2(Node* node) {
+    if (node == NULL) return;
+    Node* children[2];
+    Node_children(node, children);
+
+    // TODO: rewrite to only take single Or node into account (fixes a lot of problems) and also handle case if both or nodes contain identical nodes
+    if (node->kind == NodeOr) {
+        DynamicList TYPES(Node*) cases;
+        DynamicList_init(&cases, sizeof(Node), getLIBCAlloc(), 8);
+        or_cases(node, &cases);
+
+        Node* inner[cases.fixed.len];
+        for (size_t i = 0; i < cases.fixed.len; i ++)
+            inner[i] = last_left_chain(*(Node**)FixedList_get(cases.fixed, i));
+
+        bool eq = true;
+        for (size_t i = 1; i < cases.fixed.len; i ++) {
+            if (!Node_eq(inner[i]->chain.a, inner[0]->chain.a)) {
+                eq = false;
+                break;
+            }
+        }
+
+        if (eq) {
+            Node* new_prefix = inner[0]->chain.a;
+            inner[0]->chain.a = NULL;
+            // remove prefix from inner
+            for (size_t i = 0; i < cases.fixed.len; i ++) {
+                free(inner[i]->chain.a);
+                memcpy(inner[i], inner[i]->chain.b, sizeof(Node));
+            }
+            // chain
+            Node* right = Node_alloc();
+            memcpy(right, node, sizeof(Node));
+            node->kind = NodeChain;
+            node->chain.a = new_prefix;
+            node->chain.b = right;
+        }
+
+        DynamicList_clear(&cases);
+    }
+
+    fix_2(children[0]);
+    fix_2(children[1]);
+}
+
+// TODO: this will break the enine: a*?b|ac
 
 int main() {
-    const char * str = "\\s*?(red|green|blue)?\\s*?(car|train)\\s*?";
+    const char * str = "[a(?:cd)(?:cc)]"; // "\\s*?(red|green|blue)?\\s*?(car|train)\\s*?";
     puts(str);
     TkL li; li.tokens = lexe(str);
     Node* nd = parse(li);
@@ -892,5 +994,6 @@ int main() {
     tpre_groupid_t next = 1;
     groups(nd, 0, &next);
     fix_1(nd);
+    fix_2(nd);
     Node_print(nd, stdout, 0, true);
 }
