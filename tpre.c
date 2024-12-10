@@ -358,6 +358,7 @@ extern const char * NodeKind_str[];
 typedef struct Node Node;
 struct Node {
     NodeKind kind;
+    tpre_groupid_t group;
     union {
         tpre_pattern_t match;
 
@@ -383,6 +384,10 @@ struct Node {
         } named_capture;
     };
 };
+
+static Node* Node_alloc(void) {
+    return calloc(1, sizeof(Node));
+}
 
 static void Node_children(Node* nd, Node* childrenOut[2]) {
     childrenOut[0] = NULL;
@@ -441,12 +446,14 @@ static void Node_free(Node* node)
     free(node);
 }
 
-static void Node_print(Node* node, FILE* file, size_t indent)
+static void Node_print(Node* node, FILE* file, size_t indent, bool print_grps)
 {
     if (!node) return;
     for (size_t i = 0; i < indent * 2; i ++)
         fputc(' ', file);
     fprintf(file, "%s ", NodeKind_str[node->kind]);
+    if (print_grps)
+        fprintf(file, "@%zu ", (size_t) node->group);
     switch (node->kind) {
         case Match: {
             tpre_pattern_t pat = node->match;
@@ -459,8 +466,8 @@ static void Node_print(Node* node, FILE* file, size_t indent)
     fputc('\n', file);
     Node* children[2];
     Node_children(node, children);
-    Node_print(children[0], file, indent + 1);
-    Node_print(children[1], file, indent + 1);
+    Node_print(children[0], file, indent + 1, print_grps);
+    Node_print(children[1], file, indent + 1, print_grps);
 }
 
 typedef struct {
@@ -524,7 +531,7 @@ static bool isPostfix(ReTkTy ty) {
 static Node* maybeChain(Node* a, Node* b) {
     if (b == NULL) return a;
 
-    Node* n = malloc(sizeof(Node));
+    Node* n = Node_alloc();
     n->kind = NodeChain;
     n->chain.a = a;
     n->chain.b = b;
@@ -535,7 +542,7 @@ static Node* oneOf(Node** nodes, size_t len) {
     if (len == 0) return NULL;
     if (len == 1) return nodes[0];
     Node* rhs = oneOf(nodes + 1, len - 1);
-    Node* self = malloc(sizeof(Node));
+    Node* self = Node_alloc();
     self->kind = NodeOr;
     self->or.a = nodes[0];
     self->or.b = rhs;
@@ -543,7 +550,7 @@ static Node* oneOf(Node** nodes, size_t len) {
 }
 
 static Node* genMatch(tpre_pattern_t pat) {
-    Node* self = malloc(sizeof(Node));
+    Node* self = Node_alloc();
     self->kind = NodeMatch;
     self->match = pat;
     return self;
@@ -574,7 +581,7 @@ static void handle_postfix(Node* node, ReTk op)
             return handle_postfix(children[0], op);
     }
 
-    Node* copy = malloc(sizeof(Node));
+    Node* copy = Node_alloc();
     memcpy(copy, node, sizeof(Node));
 
     if (op.ty == OrNot) {
@@ -692,7 +699,7 @@ static Node* parse(TkL toks) {
         Node* inner = parse(TkL_copy_view(&toks, 1, i-1));
         Node* rem = parse(TkL_copy_view(&toks, i+1, TkL_len(&toks)-i-1));
 
-        Node* self = malloc(sizeof(Node));
+        Node* self = Node_alloc();
         if (firstTy == CaptureGroupOpen) {
             self->kind = NodeCaptureGroup;
             self->capture = inner;
@@ -756,7 +763,7 @@ static Node* parse(TkL toks) {
 
         replaceChainsWithOrs(self);
         if (firstTy == OneOfOpenInvert) {
-            Node* new = malloc(sizeof(Node));
+            Node* new = Node_alloc();
             new->kind = NodeNot;
             new->not = self;
             self = new;
@@ -776,19 +783,114 @@ static Node* parse(TkL toks) {
     return NULL;
 }
 
+static void or_cases(Node* or, DynamicList TYPES(Node*) * out) {
+    if (!or || or->kind != NodeOr) return;
+    if (or->or.a->kind != NodeOr)
+        DynamicList_add(out, &or->or.a);
+    else or_cases(or->or.a, out);
+    if (or->or.b->kind != NodeOr)
+        DynamicList_add(out, &or->or.b);
+    else or_cases(or->or.b, out);
+}
+
+static Node* find_trough_rep(Node* node, NodeKind what) {
+    if (node->kind == what) return node;
+
+    switch (node->kind) {
+        case NodeLazyRepeatLeast0:
+        case NodeLazyRepeatLeast1:
+        case NodeRepeatLeast0:
+        case NodeRepeatLeast1:
+            return find_trough_rep(node->repeat, what);
+
+        default:
+            return NULL;
+    }
+}
+
+static void verify(Node* nd) {
+    if (nd == NULL) return;
+    Node* children[2];
+    Node_children(nd, children);
+    verify(children[0]);
+    verify(children[1]);
+
+    if (nd->kind == NodeNamedCaptureGroup) {
+        fprintf(stderr, "named capture groups not supported\n");
+        exit(1);
+    }
+
+    if (nd->kind == NodeRepeatLeast0 || nd->kind == NodeRepeatLeast1) {
+        fprintf(stderr, "only lazy repeats supported\n");
+        exit(1);
+    }
+}
+
+static void groups(Node* nd, tpre_groupid_t group, tpre_groupid_t* global_next_group_id) {
+    if (nd == NULL) return;
+    Node* children[2];
+    Node_children(nd, children);
+
+    if (nd->kind == NodeJustGroup) {
+        memcpy(nd, nd->just_group, sizeof(Node));
+        groups(nd, group, global_next_group_id);
+        return;
+    }
+
+    if (nd->kind == NodeCaptureGroup) {
+        memcpy(nd, nd->capture, sizeof(Node));
+        groups(nd, (*global_next_group_id)++, global_next_group_id);
+        return;
+    }
+
+    nd->group = group;
+    groups(children[0], group, global_next_group_id);
+    groups(children[1], group, global_next_group_id);
+}
+
 // move all code chained to or into all or cases if any or case contains repetition
 static void fix_1(Node* node) {
     if (node == NULL) return;
     Node* children[2];
     Node_children(node, children);
-    // TODO
+
+    if (node->kind == NodeChain) {
+        Node* orr = find_trough_rep(node->chain.a, NodeOr);
+        if (orr != NULL) {
+            DynamicList TYPES(Node*) cases;
+            DynamicList_init(&cases, sizeof(Node*), getLIBCAlloc(), 8);
+            or_cases(orr, &cases);
+            Node* mov = node->chain.b;
+            for (size_t i = 0; i < cases.fixed.len; i ++) {
+                Node* cas = *(Node**)FixedList_get(cases.fixed, i);
+                Node* inner = Node_alloc();
+                memcpy(inner, cas, sizeof(Node));
+                cas->kind = NodeChain;
+                cas->chain.a = inner;
+                Node* mov2 = Node_alloc();
+                memcpy(mov2, mov, sizeof(Node));
+                cas->chain.b = mov2;
+            }
+            DynamicList_clear(&cases);
+            free(mov);
+            memcpy(node, node->chain.a, sizeof(Node));
+        }
+    }
+
+    fix_1(children[0]);
+    fix_1(children[1]);
 }
 
+// TODO: GROUPS ARE GETTING BROKEN WHEN MOVING CHAIN INSIDE OR CASES! FIX BY STORING GROUP ID IN NODE AND DO THAT BEFROE FIX1
+
 int main() {
-    const char * str = "(?:A*?|Z)W";
+    const char * str = "\\s*?(red|green|blue)?\\s*?(car|train)\\s*?";
     puts(str);
     TkL li; li.tokens = lexe(str);
     Node* nd = parse(li);
+    verify(nd);
+    tpre_groupid_t next = 1;
+    groups(nd, 0, &next);
     fix_1(nd);
-    Node_print(nd, stdout, 0);
+    Node_print(nd, stdout, 0, true);
 }
