@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include "allib/dynamic_list/dynamic_list.h"
+#include "allib/fixed_list/fixed_list.h"
 #include "allib/kallok/kallok.h"
 #include "tpre.h"
 #define CREFLECT(args, ...) __VA_ARGS__
@@ -561,8 +562,75 @@ static void replaceChainsWithOrs(Node* node) {
     replaceChainsWithOrs(children[1]);
 }
 
+static void handle_postfix(Node* node, ReTk op)
+{
+    if (node->kind == NodeChain) {
+        Node* children[2];
+        Node_children(node, children);
+
+        if (children[1] != NULL)
+            return handle_postfix(children[1], op);
+        if (children[0] != NULL)
+            return handle_postfix(children[0], op);
+    }
+
+    Node* copy = malloc(sizeof(Node));
+    memcpy(copy, node, sizeof(Node));
+
+    if (op.ty == OrNot) {
+        node->kind = NodeMaybe;
+        node->maybe = copy;
+    } else if (op.ty == RepeatLeast0) {
+        node->kind = NodeRepeatLeast0;
+        node->repeat = copy;
+    } else if (op.ty == RepeatLeast1) {
+        node->kind = NodeRepeatLeast1;
+        node->repeat = copy;
+    } else if (op.ty == RepeatLazyLeast0) {
+        node->kind = NodeLazyRepeatLeast0;
+        node->repeat = copy;
+    } else if (op.ty == RepeatLazyLeast1) {
+        node->kind = NodeLazyRepeatLeast1;
+        node->repeat = copy;
+    }
+}
+
 static Node* parse(TkL toks) {
     if (TkL_len(&toks) == 0) return NULL;
+
+    {
+        DynamicList TYPES(size_t) where;
+        DynamicList_init(&where, sizeof(size_t), getLIBCAlloc(), 0);
+        size_t nesting = 0;
+        for (size_t i = 0; i < TkL_len(&toks); i ++) {
+            ReTkTy t = TkL_get(&toks, i).ty;
+            if (isCaptureGroupOpen(t)) nesting ++;
+            else if (t == CaptureGroupClose) nesting --;
+            else if (isOneOfOpen(t)) nesting ++;
+            else if (t == OneOfClose) nesting --;
+            if (nesting == 0 && t == OrElse) {
+                if (where.fixed.len == 0)
+                    *(size_t*)DynamicList_addp(&where) = 0;
+                *(size_t*)DynamicList_addp(&where) = i-1;
+                *(size_t*)DynamicList_addp(&where) = i+1;
+            }
+        }
+        if (where.fixed.len > 0) {
+            *(size_t*)DynamicList_addp(&where) = TkL_len(&toks)-1;
+            Node* fold = NULL;
+            for (size_t i = 0; i < where.fixed.len; i += 2) {
+                size_t first = *(size_t*) FixedList_get(where.fixed, i);
+                size_t last = *(size_t*) FixedList_get(where.fixed, i + 1);
+                Node* nd = parse(TkL_copy_view(&toks, first, last-first+1));
+                if (fold == NULL)
+                    fold = nd;
+                else fold = oneOf((Node*[]) { fold, nd }, 2);
+            }
+            return fold;
+        }
+    }
+
+
 
     // weird code for postfix operators
     {
@@ -597,26 +665,9 @@ static Node* parse(TkL toks) {
 
             if (fold)
                 lhs = maybeChain(fold, lhs);
+            fold = lhs;
 
-            Node* self = malloc(sizeof(Node));
-            if (op.ty == OrNot) {
-                self->kind = NodeMaybe;
-                self->maybe = lhs;
-            } else if (op.ty == RepeatLeast0) {
-                self->kind = NodeRepeatLeast0;
-                self->repeat = lhs;
-            } else if (op.ty == RepeatLeast1) {
-                self->kind = NodeRepeatLeast1;
-                self->repeat = lhs;
-            } else if (op.ty == RepeatLazyLeast0) {
-                self->kind = NodeLazyRepeatLeast0;
-                self->repeat = lhs;
-            } else if (op.ty == RepeatLazyLeast1) {
-                self->kind = NodeLazyRepeatLeast1;
-                self->repeat = lhs;
-            }
-
-            fold = self;
+            handle_postfix(fold, op);
         }
 
         if (fold != NULL) {
@@ -715,6 +766,7 @@ static Node* parse(TkL toks) {
     }
 
 /*
+ * TODO:
     OrElse,
     StartOfStr,
 */
@@ -724,8 +776,19 @@ static Node* parse(TkL toks) {
     return NULL;
 }
 
+// move all code chained to or into all or cases if any or case contains repetition
+static void fix_1(Node* node) {
+    if (node == NULL) return;
+    Node* children[2];
+    Node_children(node, children);
+    // TODO
+}
+
 int main() {
-    TkL li; li.tokens = lexe("ab(cd.*)?[a-c]");
+    const char * str = "(?:A*?|Z)W";
+    puts(str);
+    TkL li; li.tokens = lexe(str);
     Node* nd = parse(li);
+    fix_1(nd);
     Node_print(nd, stdout, 0);
 }
