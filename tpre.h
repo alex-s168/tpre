@@ -20,6 +20,7 @@ typedef struct {
 } tpre_pattern_t;
 
 typedef struct {
+    bool free;
     tpre_nodeid_t num_nodes;
     tpre_nodeid_t first_node;
     tpre_groupid_t max_group;
@@ -41,6 +42,10 @@ typedef struct {
 void tpre_match_free(tpre_match_t match);
 tpre_match_t tpre_match(tpre_re_t const* re, const char * str);
 void tpre_match_dump(tpre_match_t match, FILE* out);
+
+/** 0 = ok */
+int tpre_compile(tpre_re_t* out, char const * str, DynamicList TYPES(char *) * errsOut);
+void tpre_free(tpre_re_t re);
 
 #ifdef __cplusplus
 }

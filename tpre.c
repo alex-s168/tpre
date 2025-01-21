@@ -19,6 +19,30 @@
 #define NO(c) ((tpre_pattern_t) {.is_special = 0,.val=(uint8_t)c})
 #define SP(c) ((tpre_pattern_t) {.is_special = 1,.val=(uint8_t)c})
 
+
+static void tpre_re_setnode(
+        tpre_re_t* re,
+        tpre_nodeid_t id,
+        tpre_pattern_t   pat,
+        tpre_nodeid_t   ok,
+        tpre_nodeid_t   err,
+        tpre_backtrack_t backtrack,
+        tpre_groupid_t  group)
+{
+#define do(k) \
+    re->i_##k[id] = k;
+
+    do(pat);
+    do(ok);
+    do(err);
+    do(backtrack);
+    do(group);
+
+#undef do
+
+    if (group > re->max_group) re->max_group = group;
+}
+
 static tpre_nodeid_t tpre_re_addnode(
         tpre_re_t* re,
         tpre_pattern_t   pat,
@@ -28,7 +52,8 @@ static tpre_nodeid_t tpre_re_addnode(
         tpre_groupid_t  group)
 {
 #define realloc(k) \
-    re->i_##k = realloc(re->i_##k, sizeof(*re->i_##k) * re->num_nodes); \
+    re->i_##k = realloc(re->i_##k, sizeof(*re->i_##k) * (re->num_nodes + 1)); \
+    assert(re->i_##k); \
     re->i_##k[re->num_nodes] = k;
 
     realloc(pat);
@@ -40,9 +65,15 @@ static tpre_nodeid_t tpre_re_addnode(
 #undef realloc
 
     if (group > re->max_group) re->max_group = group;
-
+    re->free = true;
     return re->num_nodes ++;
 }
+
+static tpre_nodeid_t tpre_re_resvnode(tpre_re_t* re)
+{
+    return tpre_re_addnode(re, (tpre_pattern_t) {}, 0, 0, 0, 0);
+}
+
 
 void tpre_match_free(tpre_match_t match)
 {
@@ -204,9 +235,7 @@ static bool lex(ReTk* tkOut, char const* * reader)
             case 'r': m = NO('\r'); break;
             case 'n': m = NO('\n'); break;
             case 'f': m = NO('\f'); break;
-
             case 's': m = SP(SPECIAL_SPACE); break;
-
             default:  m = NO(c); break;
         }
         tkOut->ty = Match;
@@ -446,6 +475,63 @@ static void Node_free(Node* node)
     Node_free(children[0]);
     Node_free(children[1]);
     free(node);
+}
+
+static Node* Node_clone(Node* node)
+{
+    Node* copy = Node_alloc();
+    copy->kind = node->kind;
+    copy->group = node->group;
+
+    switch (node->kind)
+    {
+        case NodeMatch:
+            copy->match = node->match;
+            break;
+
+        case NodeStartOfStr:
+            break;
+
+        case NodeChain:
+            copy->chain.a = Node_clone(node->chain.a);
+            copy->chain.b = Node_clone(node->chain.b);
+            break;
+
+        case NodeOr:
+            copy->or.a = Node_clone(node->or.a);
+            copy->or.b = Node_clone(node->or.b);
+            break;
+
+        case NodeMaybe:
+            copy->maybe = Node_clone(node->maybe);
+            break;
+
+        case NodeNot:
+            copy->not = Node_clone(node->not);
+            break;
+
+        case NodeRepeatLeast0:
+        case NodeRepeatLeast1:
+        case NodeLazyRepeatLeast0:
+        case NodeLazyRepeatLeast1:
+            copy->repeat = Node_clone(node->repeat);
+            break;
+
+        case NodeJustGroup:
+            copy->just_group = Node_clone(node->just_group);
+            break;
+
+        case NodeCaptureGroup:
+            copy->capture = Node_clone(node->capture);
+            break;
+
+        case NodeNamedCaptureGroup:
+            copy->named_capture.group = Node_clone(node->named_capture.group);
+            memcpy(copy->named_capture.name, node->named_capture.name, 20);
+            break;
+    }
+
+    return copy;
 }
 
 static void Node_print(Node* node, FILE* file, size_t indent, bool print_grps)
@@ -858,7 +944,8 @@ static Node* find_trough_rep(Node* node, NodeKind what) {
 }
 
 static Node* last_left_chain(Node* node) {
-    assert(node->kind == NodeChain);
+    if (node->kind == NodeOr) return last_left_chain(node->or.a);
+    if (node->kind != NodeChain) return NULL;
     if (node->chain.a->kind == NodeChain) return last_left_chain(node->chain.a);
     return node;
 }
@@ -903,6 +990,28 @@ static void groups(Node* nd, tpre_groupid_t group, tpre_groupid_t* global_next_g
     groups(children[1], group, global_next_group_id);
 }
 
+/** convert RepeatLazyLeast1 to RepeatLazyLeast0 */
+static void fix_0(Node* node) {
+    if (node == NULL) return;
+    Node* children[2];
+    Node_children(node, children);
+
+    fix_0(children[0]);
+    fix_0(children[1]);
+
+    if (node->kind == NodeLazyRepeatLeast1)
+    {
+        Node* first = Node_clone(node->repeat);
+        Node* rep = Node_alloc();
+        rep->group = node->group;
+        rep->kind = NodeLazyRepeatLeast0;
+        rep->repeat = node->repeat;
+        node->kind = NodeChain;
+        node->chain.a = first;
+        node->chain.b = rep;
+    }
+}
+
 /** move all code chained to or into all or cases if any or case contains repetition */
 static void fix_1(Node* node) {
     if (node == NULL) return;
@@ -922,12 +1031,11 @@ static void fix_1(Node* node) {
                 memcpy(inner, cas, sizeof(Node));
                 cas->kind = NodeChain;
                 cas->chain.a = inner;
-                Node* mov2 = Node_alloc();
-                memcpy(mov2, mov, sizeof(Node));
+                Node* mov2 = Node_clone(mov);
                 cas->chain.b = mov2;
             }
             DynamicList_clear(&cases);
-            free(mov);
+            Node_free(mov);
             memcpy(node, node->chain.a, sizeof(Node));
         }
     }
@@ -949,37 +1057,153 @@ static void fix_2(Node* node) {
         Node* a = node->or.a;
         Node* b = node->or.b;
 
-        if (a->kind == NodeChain && b->kind == NodeChain) {
-            a = last_left_chain(a);
-            b = last_left_chain(b);
+        a = last_left_chain(a);
+        b = last_left_chain(b);
 
-            if (Node_eq(a->chain.a, b->chain.a)) {
-                Node* prefix = a->chain.a;
-                free(b->chain.a);
-                memcpy(a, a->chain.b, sizeof(Node));
-                memcpy(b, b->chain.b, sizeof(Node));
+        if (a && b && Node_eq(a->chain.a, b->chain.a)) {
+            Node* prefix = a->chain.a;
+            free(b->chain.a);
+            memcpy(a, a->chain.b, sizeof(Node));
+            memcpy(b, b->chain.b, sizeof(Node));
 
-                Node* right = Node_alloc();
-                memcpy(right, node, sizeof(Node));
-                node->kind = NodeChain;
-                node->chain.a = prefix;
-                node->chain.b = right;
-            }
+            Node* right = Node_alloc();
+            memcpy(right, node, sizeof(Node));
+            node->kind = NodeChain;
+            node->chain.a = prefix;
+            node->chain.b = right;
         }
     }
 }
 
-// TODO: this will break the enine: a*?b|ac
+static void lower(tpre_re_t* out, tpre_nodeid_t this_id, tpre_nodeid_t on_ok, tpre_nodeid_t on_error, tpre_backtrack_t bt, size_t* num_match, Node* node)
+{
+    switch (node->kind)
+    {
+        case NodeLazyRepeatLeast1:
+        case NodeRepeatLeast0:
+        case NodeRepeatLeast1:
+            __builtin_unreachable();
+            break;
 
-int main() {
-    const char * str = "[a(?:cd)(?:cc)]"; // "\\s*?(red|green|blue)?\\s*?(car|train)\\s*?";
-    puts(str);
+        case NodeMatch: {
+            if (num_match) (*num_match)++;
+            tpre_re_setnode(out, this_id,
+                    node->match,
+                    on_ok,
+                    on_error,
+                    bt,
+                    node->group);
+        } break;
+
+        case NodeLazyRepeatLeast0: {
+            lower(out, this_id, this_id, on_ok, 0, NULL, node->repeat);
+        } break;
+
+        case NodeChain: {
+            size_t nimatch = 0;
+            tpre_nodeid_t right = tpre_re_resvnode(out);
+            lower(out, this_id, right, on_error, bt, &nimatch, node->chain.a);
+            if (num_match) (*num_match) += nimatch;
+            lower(out, right, on_ok, on_error, bt + nimatch, num_match, node->chain.b);
+        } break;
+
+        case NodeOr: {
+            tpre_nodeid_t right = tpre_re_resvnode(out);
+            lower(out, this_id, on_ok, right, bt, NULL, node->or.a);
+            lower(out, right, on_ok, on_error, bt, NULL, node->or.b);
+        } break;
+
+        case NodeMaybe: {
+            lower(out, this_id, on_ok, on_ok, bt, num_match, node->maybe);
+        } break;
+
+        case NodeStartOfStr:
+        default:
+            assert(false && "bruh");
+            break;
+    }
+}
+
+/** 0 = ok */
+int tpre_compile(tpre_re_t* out, char const * str, DynamicList TYPES(char *) * errsOut)
+{
     TkL li; li.tokens = lexe(str);
     Node* nd = parse(li);
     verify(nd);
-    tpre_groupid_t next = 1;
-    groups(nd, 0, &next);
+    tpre_groupid_t nextgr = 1;
+    groups(nd, 0, &nextgr);
+    fix_0(nd);
     fix_1(nd);
     fix_2(nd);
-    Node_print(nd, stdout, 0, true);
+
+    memset(out, 0, sizeof(tpre_re_t));
+    tpre_nodeid_t nd0 = tpre_re_resvnode(out);
+    lower(out, nd0, NODE_DONE, NODE_ERR, 0, NULL, nd);
+
+    return 0;
+}
+
+void tpre_free(tpre_re_t re)
+{
+    if (re.free) {
+        free(re.i_ok);
+        free(re.i_err);
+        free(re.i_pat);
+        free(re.i_group);
+        free(re.i_backtrack);
+    }
+}
+
+static void tpre_dump(tpre_re_t out)
+{
+    printf("nd\tok\terr\tv\tbt\n");
+    for (size_t i = 0; i < out.num_nodes; i ++)
+    {
+        printf("%zu\t%i\t%i\t%c\t%u\n", i, out.i_ok[i], out.i_err[i], out.i_pat[i].val, out.i_backtrack[i]);
+    }
+}
+
+// TODO: this will break the enine: a*?b|ac
+// TODO: this will break the engine (ab)*|(ac)*
+
+int main() {
+    const char * str = "\\s*?(red|green|blue)?\\s*?(car|train)\\s*?";
+
+    tpre_re_t re;
+    DynamicList TYPES(char*) errs;
+    DynamicList_init(&errs, sizeof(char*), getLIBCAlloc(), 0);
+    if (tpre_compile(&re, str, &errs) != 0) {
+        fprintf(stderr, "regex compile failed:\n");
+        for (size_t i = 0; i < errs.fixed.len; i ++) {
+            char* reason = *(char**)FixedList_get(errs.fixed, i);
+            fprintf(stderr, "  %s\n", reason);
+            free(reason);
+        }
+        return 1;
+    }
+
+    tpre_match_t m;
+
+    m = tpre_match(&re, "blue car");
+    tpre_match_dump(m, stdout);
+    tpre_match_free(m);
+
+    m = tpre_match(&re, "   red   car ");
+    tpre_match_dump(m, stdout);
+    tpre_match_free(m);
+
+    m = tpre_match(&re, "  green   train    ");
+    tpre_match_dump(m, stdout);
+    tpre_match_free(m);
+
+    m = tpre_match(&re, "    car    ");
+    tpre_match_dump(m, stdout);
+    tpre_match_free(m);
+
+
+    m = tpre_match(&re, "    train    ");
+    tpre_match_dump(m, stdout);
+    tpre_match_free(m);
+
+
 }
