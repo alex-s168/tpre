@@ -43,7 +43,7 @@ void tpre_match_free(tpre_match_t match);
 tpre_match_t tpre_match(tpre_re_t const* re, const char * str);
 void tpre_match_dump(tpre_match_t match, FILE* out);
 
-/** 0 = ok */
+/** 0 = ok; errsOut can be null */
 int tpre_compile(tpre_re_t* out, char const * str, DynamicList TYPES(char *) * errsOut);
 void tpre_free(tpre_re_t re);
 

@@ -3,6 +3,7 @@
 #include <pcre2.h>
 #include <regex>
 
+#include <string.h>
 #include <string>
 #include <time.h>
 #include <stdio.h>
@@ -18,20 +19,8 @@ int main()
     const char * resrc = "\\s*?(red|green|blue)?\\s*?(car|train)\\s*?";
 
     tpre_re_t re;
-    re.i_ok  = new tpre_nodeid_t[] { 4,5,6,0, 7,8,9,15,10,11,12,15,15,15,16,17,18,19,20,23,21,23,-2,23 };
-    re.i_err = new tpre_nodeid_t[] { 1,2,3,15,1,2,3,1, 2, 3, 2, 3, 2, -1,13,14,13,14,13,14,13,13,-1,22 };
-    re.i_pat = new tpre_pattern_t[] {
-        NO('r'), NO('g'), NO('b'), SP(SPECIAL_SPACE),
-        NO('e'), NO('r'), NO('l'), NO('d'), NO('e'), NO('u'), NO('e'), NO('e'), NO('n'),
-        SP(SPECIAL_SPACE),
-        NO('t'), NO('c'), NO('r'), NO('a'), NO('a'), NO('r'), NO('i'), NO('n'),
-        SP(SPECIAL_END), SP(SPECIAL_SPACE)
-    };
-    re.i_backtrack = new tpre_backtrack_t[] { 0,0,0,0,1,1,1,2,2,2,3,3,4,0,0,0,1,1,2,2,3,4,0,0 };
-    re.i_group = new tpre_groupid_t[] { 1,1,1,0,1,1,1,1,1,1,1,1,1,0,2,2,2,2,2,2,2,2,0,0 };
-    re.first_node = 0;
-    re.max_group = 2;
-    re.num_nodes = 24;
+    if (tpre_compile(&re, resrc, NULL) != 0)
+        return 1;
 
     {
         tpre_match_t match = tpre_match(&re, " green car ");
