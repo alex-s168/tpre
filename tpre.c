@@ -4,11 +4,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <stdio.h>
-#include "allib/dynamic_list/dynamic_list.h"
-#include "allib/fixed_list/fixed_list.h"
-#include "allib/kallok/kallok.h"
 #include "tpre.h"
-#define CREFLECT(args, ...) __VA_ARGS__
 
 #define NODE_DONE ((tpre_nodeid_t) -2)
 #define NODE_ERR  ((tpre_nodeid_t) -1)
@@ -74,18 +70,19 @@ static tpre_nodeid_t tpre_re_resvnode(tpre_re_t* re)
     return tpre_re_addnode(re, (tpre_pattern_t) {}, 0, 0, 0, 0);
 }
 
-
 void tpre_match_free(tpre_match_t match)
 {
-    for (size_t i = 0; i < match.ngroups; i ++)
-        DynamicList_clear(&match.groups[i]);
     free(match.groups);
 }
 
-static void tpre_match_group_put(tpre_match_t* match, tpre_groupid_t group, char c)
+static void tpre_match_group_put(tpre_match_t* match, tpre_groupid_t group, char c, tpre_src_loc_t loc)
 {
     if (group == 0) return;
-    DynamicList_add(&match->groups[group], &c);
+    tpre_group_t* g = &match->groups[group];
+    if (g->len == 0) {
+        g->begin = loc;
+    }
+    g->len ++;
 }
 
 static bool pattern_match(tpre_pattern_t pat, char src)
@@ -113,16 +110,15 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
 {
     tpre_match_t match;
     match.ngroups = re->max_group + 1;
-    match.groups = malloc(sizeof(*match.groups) * match.ngroups);
-    for (size_t i = 0; i < match.ngroups; i ++) {
-        DynamicList_init(&match.groups[i], sizeof(char), getLIBCAlloc(), 0);
-    }
+    match.groups = calloc(sizeof(*match.groups), match.ngroups);
+
+    const char * begin_str = str;
 
     tpre_nodeid_t cursor = re->first_node;
     while (cursor >= 0)
     {
         if (pattern_match(re->i_pat[cursor], *str)) {
-            tpre_match_group_put(&match, re->i_group[cursor], *str);
+            tpre_match_group_put(&match, re->i_group[cursor], *str, str - begin_str);
             cursor = re->i_ok[cursor];
             if (*str) str ++;
         } else {
@@ -130,9 +126,12 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
             str -= bt;
             tpre_groupid_t g = re->i_group[cursor];
             if (bt > 0) {
-                size_t glen = match.groups[g].fixed.len;
-                if (match.groups[g].fixed.len >= bt)
-                    match.groups[g].fixed.len -= bt;
+                if (match.groups[g].len >= bt) {
+                    size_t n = bt;
+                    if (n > match.groups[g].len)
+                        n = match.groups[g].len;
+                    match.groups[g].len -= n;
+                }
             }
             cursor = re->i_err[cursor];
         }
@@ -140,19 +139,17 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
 
     match.found = cursor == NODE_DONE;
 
-    for (size_t i = 0; i < match.ngroups; i ++)
-        if (match.groups[i].fixed.len > 0)
-            DynamicList_add(&match.groups[i], (char[]) { '\0' });
-
     return match;
 }
 
-void tpre_match_dump(tpre_match_t match, FILE* out)
+void tpre_match_dump(tpre_match_t match, char const * matched_str, FILE* out)
 {
     if (match.found) {
         fprintf(out, "does match\n");
-        for (size_t i = 0; i < match.ngroups; i ++) {
-            fprintf(out, "  group %zu: %s\n", i, match.groups[i].fixed.len > 0 ? ((const char *) match.groups[i].fixed.data) : "");
+        for (size_t i = 1; i < match.ngroups; i ++) {
+            fprintf(out, "  group %zu: ", i);
+            fwrite(matched_str + match.groups[i].begin, 1, match.groups[i].len, out);
+            fprintf(out, "\n");
         }
     }
     else {
@@ -160,8 +157,6 @@ void tpre_match_dump(tpre_match_t match, FILE* out)
     }
 }
 
-
-CREFLECT((),
 typedef enum {
     Match,
     MatchRange,
@@ -179,8 +174,26 @@ typedef enum {
     OneOfClose,
     OrElse,
     StartOfStr,
-} ReTkTy);
-extern const char * ReTkTy_str[];
+} ReTkTy;
+
+static const char * ReTkTy_str[] = {
+    [Match] = "Match",
+    [MatchRange] = "MatchRange",
+    [RepeatLazyLeast0] = "RepeatLazyLeast0",
+    [RepeatLeast0] = "RepeatLeast0",
+    [RepeatLazyLeast1] = "RepeatLazyLeast1",
+    [RepeatLeast1] = "RepeatLeast1",
+    [OrNot] = "OrNot",
+    [CaptureGroupOpen] = "CaptureGroupOpen",
+    [CaptureGroupOpenNoCapture] = "CaptureGroupOpenNoCapture",
+    [CaptureGroupOpenNamed] = "CaptureGroupOpenNamed",
+    [CaptureGroupClose] = "CaptureGroupClose",
+    [OneOfOpen] = "OneOfOpen",
+    [OneOfOpenInvert] = "OneOfOpenInvert",
+    [OneOfClose] = "OneOfClose",
+    [OrElse] = "OrElse",
+    [StartOfStr] = "StartOfStr",
+};
 
 typedef struct {
     ReTkTy ty;
@@ -349,25 +362,86 @@ static bool lex(ReTk* tkOut, char const* * reader)
     return true;
 }
 
-static DynamicList TYPES(ReTk) lexe(const char * src)
+typedef struct {
+    void* allocptr;
+    ReTk* tokens;
+    size_t cap;
+    size_t len;
+} TkL;
+
+static size_t TkL_len(TkL const* li) {
+    return li->len;
+}
+
+static bool TkL_peek(ReTk* out, TkL* li) {
+    if (TkL_len(li) == 0) return false;
+    *out = li->tokens[0];
+    return true;
+}
+
+static ReTk TkL_get(TkL const* li, size_t i) {
+    return li->tokens[i];
+}
+
+static bool TkL_take(ReTk* out, TkL* li) {
+    if (TkL_len(li) == 0) return false;
+    *out = TkL_get(li, 0);
+    li->tokens ++;
+    li->len --;
+    li->cap --;
+    return true;
+}
+
+static void TkL_free(TkL* li) {
+    free(li->allocptr);
+}
+
+static TkL TkL_copy_range(TkL const* li, size_t first, size_t num) {
+    TkL out = {0};
+    out.len = num;
+    out.cap = num;
+    out.allocptr = malloc(li->cap * sizeof(ReTk));
+    out.tokens = out.allocptr;
+    memcpy(out.tokens, li->tokens + first, num * sizeof(ReTk));
+    return out;
+}
+
+static void TkL_add(TkL* li, ReTk tk) {
+    if (li->len + 1 > li->cap) {
+        li->cap += 16;
+        ReTk* new = malloc(li->cap * sizeof(ReTk));
+        if (!new) {
+            free(li->tokens);
+            fprintf(stderr, "out of memory");
+            exit(1);
+        }
+        memcpy(new, li->tokens, li->len * sizeof(ReTk));
+        free(li->allocptr);
+        li->allocptr = new;
+        li->tokens = new;
+    }
+    li->tokens[li->len ++] = tk;
+}
+
+static TkL lexe(const char * src)
 {
-    DynamicList out; DynamicList_init(&out, sizeof(ReTk), getLIBCAlloc(), 0);
+    TkL out = {0};
 
     ReTk tok;
     const char* reader = src;
     while (lex(&tok, &reader)) {
-        DynamicList_add(&out, &tok);
+        TkL_add(&out, tok);
     }
 
     if (*reader) {
         fprintf(stderr, "error at arround %zu\n", reader - src);
+        free(out.tokens);
         exit(1);
     }
 
     return out;
 }
 
-CREFLECT((remove_prefix(Node)),
 typedef enum {
     NodeMatch,
     NodeStartOfStr,
@@ -382,8 +456,23 @@ typedef enum {
     NodeJustGroup,
     NodeCaptureGroup,
     NodeNamedCaptureGroup,
-} NodeKind);
-extern const char * NodeKind_str[];
+} NodeKind;
+
+static const char * NodeKind_str[] = {
+    [NodeMatch] = "Match",
+    [NodeStartOfStr] = "StartOfStr",
+    [NodeChain] = "Chain",
+    [NodeOr] = "Or",
+    [NodeMaybe] = "Maybe",
+    [NodeNot] = "Not",
+    [NodeRepeatLeast0] = "RepeatLeast0",
+    [NodeRepeatLeast1] = "RepeatLeast1",
+    [NodeLazyRepeatLeast0] = "LazyRepeatLeast0",
+    [NodeLazyRepeatLeast1] = "LazyRepeatLeast1",
+    [NodeJustGroup] = "JustGroup",
+    [NodeCaptureGroup] = "CaptureGroup",
+    [NodeNamedCaptureGroup] = "NamedCaptureGroup",
+};
 
 typedef struct Node Node;
 struct Node {
@@ -602,45 +691,6 @@ static bool Node_eq(Node* a, Node* b) {
     }
 }
 
-typedef struct {
-    DynamicList TYPES(ReTk) tokens;
-} TkL;
-
-static size_t TkL_len(TkL const* li) {
-    return li->tokens.fixed.len;
-}
-
-static bool TkL_peek(ReTk* out, TkL* li) {
-    if (TkL_len(li) == 0) return false;
-    *out = * (ReTk*) FixedList_get(li->tokens.fixed, 0);
-    return true;
-}
-
-static ReTk TkL_get(TkL const* li, size_t i) {
-    return * (ReTk*) FixedList_get(li->tokens.fixed, i);
-}
-
-static bool TkL_take(ReTk* out, TkL* li) {
-    if (TkL_len(li) == 0) return false;
-    *out = TkL_get(li, 0);
-    DynamicList_removeAt(&li->tokens, 0);
-    return true;
-}
-
-static void TkL_free(TkL* li) {
-    DynamicList_clear(&li->tokens);
-}
-
-static TkL TkL_copy_view(TkL const* li, size_t first, size_t num) {
-    TkL out;
-    DynamicList_init(&out.tokens, sizeof(ReTk), getLIBCAlloc(), num);
-    for (size_t i = 0; i < num; i ++) {
-        ReTk t = TkL_get(li, i + first);
-        DynamicList_add(&out.tokens, &t);
-    }
-    return out;
-}
-
 static bool isCaptureGroupOpen(ReTkTy ty) {
     return ty == CaptureGroupOpen ||
            ty == CaptureGroupOpenNamed ||
@@ -737,10 +787,14 @@ static void handle_postfix(Node* node, ReTk op)
 static Node* parse(TkL toks) {
     if (TkL_len(&toks) == 0) return NULL;
 
+    // weird code for ors
     {
-        DynamicList TYPES(size_t) where;
-        DynamicList_init(&where, sizeof(size_t), getLIBCAlloc(), 0);
+        TkL* seg = NULL;
+        size_t seglen = 0;
+
+        // split with nesting at ors
         size_t nesting = 0;
+        size_t begin = 0;
         for (size_t i = 0; i < TkL_len(&toks); i ++) {
             ReTkTy t = TkL_get(&toks, i).ty;
             if (isCaptureGroupOpen(t)) nesting ++;
@@ -748,33 +802,38 @@ static Node* parse(TkL toks) {
             else if (isOneOfOpen(t)) nesting ++;
             else if (t == OneOfClose) nesting --;
             if (nesting == 0 && t == OrElse) {
-                if (where.fixed.len == 0)
-                    *(size_t*)DynamicList_addp(&where) = 0;
-                *(size_t*)DynamicList_addp(&where) = i-1;
-                *(size_t*)DynamicList_addp(&where) = i+1;
+                TkL tokl = TkL_copy_range(&toks, begin, i - begin);
+                seg = realloc(seg, sizeof(*seg) * (seglen+1));
+                seg[seglen++] = tokl;
+                begin = i + 1;
             }
         }
-        if (where.fixed.len > 0) {
-            *(size_t*)DynamicList_addp(&where) = TkL_len(&toks)-1;
+        if (TkL_len(&toks) - begin > 0) {
+            TkL tokl = TkL_copy_range(&toks, begin, TkL_len(&toks) - begin);
+            seg = realloc(seg, sizeof(*seg) * (seglen+1));
+            seg[seglen++] = tokl;
+        }
+
+        if (seglen >= 2) {
             Node* fold = NULL;
-            for (size_t i = 0; i < where.fixed.len; i += 2) {
-                size_t first = *(size_t*) FixedList_get(where.fixed, i);
-                size_t last = *(size_t*) FixedList_get(where.fixed, i + 1);
-                Node* nd = parse(TkL_copy_view(&toks, first, last-first+1));
+            for (size_t i = 0; i < seglen; i ++) {
+                Node* nd = parse(seg[i]);
                 if (fold == NULL)
                     fold = nd;
                 else fold = oneOf((Node*[]) { fold, nd }, 2);
             }
+            free(seg);
+            TkL_free(&toks);
             return fold;
         }
+
+        free(seg);
     }
-
-
 
     // weird code for postfix operators
     {
-        DynamicList TYPES(size_t) postfixes;
-        DynamicList_init(&postfixes, sizeof(size_t), getLIBCAlloc(), 0);
+        char* is_postfix = calloc(TkL_len(&toks), 1);
+        void* is_postfix_alloc = is_postfix;
 
         size_t nesting = 0;
         for (size_t i = 0; i < TkL_len(&toks); i ++) {
@@ -785,21 +844,21 @@ static Node* parse(TkL toks) {
             else if (t == OneOfClose) nesting --;
 
             if (nesting == 0 && isPostfix(t)) {
-                DynamicList_add(&postfixes, &i);
+                is_postfix[i] = true;
             }
         }
 
         Node* fold = NULL;
-        while (postfixes.fixed.len > 0) {
-            size_t idx = * (size_t*) FixedList_get(postfixes.fixed, 0);
-            DynamicList_removeAt(&postfixes, 0);
+        for (size_t idx = 0; idx < TkL_len(&toks); idx ++) {
+            if (!is_postfix[idx])
+                continue;
 
             ReTk op = TkL_get(&toks, idx);
-            Node* lhs = parse(TkL_copy_view(&toks, 0, idx));
+            Node* lhs = parse(TkL_copy_range(&toks, 0, idx));
 
-            DynamicList_removeRange(&toks.tokens, 0, idx);
-            for (size_t i = 0; i < postfixes.fixed.len; i ++) {
-                *((size_t *) FixedList_get(postfixes.fixed, i)) -= idx + 1;
+            for (size_t i = 0; i < idx + 1; i ++) {
+                ReTk ign;
+                TkL_take(&ign, &toks);
             }
 
             if (fold)
@@ -808,6 +867,8 @@ static Node* parse(TkL toks) {
 
             handle_postfix(fold, op);
         }
+
+        free(is_postfix_alloc);
 
         if (fold != NULL) {
             return maybeChain(fold, parse(toks));
@@ -828,8 +889,8 @@ static Node* parse(TkL toks) {
             }
         }
 
-        Node* inner = parse(TkL_copy_view(&toks, 1, i-1));
-        Node* rem = parse(TkL_copy_view(&toks, i+1, TkL_len(&toks)-i-1));
+        Node* inner = parse(TkL_copy_range(&toks, 1, i-1));
+        Node* rem = parse(TkL_copy_range(&toks, i+1, TkL_len(&toks)-i-1));
 
         Node* self = Node_alloc();
         if (firstTy == CaptureGroupOpen) {
@@ -849,7 +910,7 @@ static Node* parse(TkL toks) {
     }
 
     if (firstTy == Match) {
-        Node* rem = parse(TkL_copy_view(&toks, 1, TkL_len(&toks)-1));
+        Node* rem = parse(TkL_copy_range(&toks, 1, TkL_len(&toks)-1));
         Node* self = genMatch(TkL_get(&toks, 0).match);
 
         TkL_free(&toks);
@@ -857,7 +918,7 @@ static Node* parse(TkL toks) {
     }
 
     if (firstTy == StartOfStr) {
-        Node* rem = parse(TkL_copy_view(&toks, 1, TkL_len(&toks)-1));
+        Node* rem = parse(TkL_copy_range(&toks, 1, TkL_len(&toks)-1));
         Node* self = Node_alloc();
         self->kind = NodeStartOfStr;
 
@@ -866,7 +927,7 @@ static Node* parse(TkL toks) {
     }
 
     if (firstTy == MatchRange) {
-        Node* rem = parse(TkL_copy_view(&toks, 1, TkL_len(&toks)-1));
+        Node* rem = parse(TkL_copy_range(&toks, 1, TkL_len(&toks)-1));
 
         char from = TkL_get(&toks, 0).range.from;
         char to = TkL_get(&toks, 0).range.to;
@@ -898,8 +959,8 @@ static Node* parse(TkL toks) {
             }
         }
 
-        Node* self = parse(TkL_copy_view(&toks, 1, i-1));
-        Node* rem = parse(TkL_copy_view(&toks, i+1, TkL_len(&toks)-i-1));
+        Node* self = parse(TkL_copy_range(&toks, 1, i-1));
+        Node* rem = parse(TkL_copy_range(&toks, i+1, TkL_len(&toks)-i-1));
         TkL_free(&toks);
 
         replaceChainsWithOrs(self);
@@ -913,18 +974,28 @@ static Node* parse(TkL toks) {
         return maybeChain(self, rem);
     }
 
+    fprintf(stderr, "unparsed tok! %s\n", ReTkTy_str[TkL_get(&toks, 0).ty]);
     TkL_free(&toks);
-    assert(false);
-    return NULL;
+    exit(1);
 }
 
-static void or_cases(Node* or, DynamicList TYPES(Node*) * out) {
+typedef struct {
+    Node** items;
+    size_t len;
+} NodeLi;
+
+static void NodeLi_add(NodeLi* li, Node* nd) {
+    li->items = realloc(li->items, sizeof(Node*) * (li->len + 1));
+    li->items[li->len ++] = nd;
+}
+
+static void or_cases(Node* or, NodeLi * out) {
     if (!or || or->kind != NodeOr) return;
     if (or->or.a->kind != NodeOr)
-        DynamicList_add(out, &or->or.a);
+        NodeLi_add(out, or->or.a);
     else or_cases(or->or.a, out);
     if (or->or.b->kind != NodeOr)
-        DynamicList_add(out, &or->or.b);
+        NodeLi_add(out, or->or.b);
     else or_cases(or->or.b, out);
 }
 
@@ -1021,12 +1092,11 @@ static void fix_1(Node* node) {
     if (node->kind == NodeChain) {
         Node* orr = find_trough_rep(node->chain.a, NodeOr);
         if (orr != NULL) {
-            DynamicList TYPES(Node*) cases;
-            DynamicList_init(&cases, sizeof(Node*), getLIBCAlloc(), 8);
+            NodeLi cases = {0};
             or_cases(orr, &cases);
             Node* mov = node->chain.b;
-            for (size_t i = 0; i < cases.fixed.len; i ++) {
-                Node* cas = *(Node**)FixedList_get(cases.fixed, i);
+            for (size_t i = 0; i < cases.len; i ++) {
+                Node* cas = cases.items[i];
                 Node* inner = Node_alloc();
                 memcpy(inner, cas, sizeof(Node));
                 cas->kind = NodeChain;
@@ -1034,7 +1104,7 @@ static void fix_1(Node* node) {
                 Node* mov2 = Node_clone(mov);
                 cas->chain.b = mov2;
             }
-            DynamicList_clear(&cases);
+            free(cases.items);
             Node_free(mov);
             memcpy(node, node->chain.a, sizeof(Node));
         }
@@ -1124,12 +1194,66 @@ static void lower(tpre_re_t* out, tpre_nodeid_t this_id, tpre_nodeid_t on_ok, tp
     }
 }
 
-/** 0 = ok */
-int tpre_compile(tpre_re_t* out, char const * str, DynamicList TYPES(char *) * errsOut)
-{
-    // errsOut can be null!
+static Node* leftmost(Node* node) {
+    switch (node->kind) {
+        case NodeLazyRepeatLeast0:
+        case NodeLazyRepeatLeast1:
+        case NodeRepeatLeast0:
+        case NodeRepeatLeast1:
+            return leftmost(node->repeat);
 
-    TkL li; li.tokens = lexe(str);
+        case NodeChain:
+            return leftmost(node->chain.a);
+
+        case NodeMaybe:
+            return leftmost(node->maybe);
+
+        default:
+            return node;
+    }
+}
+
+static void check_legal(Node* nd) {
+    if (nd->kind == NodeOr)
+    {
+        // this is invalid: a*?b|ac
+        // this is invalid too: (ab)*|(ac)*
+    
+        NodeLi cases = {0};
+        or_cases(nd, &cases);
+
+        for (size_t i = 0; i < cases.len; i ++) {
+            for (size_t j = 0; j < cases.len; j ++) {
+                if (i == j) continue;
+
+                Node* a = leftmost(cases.items[i]);
+                Node* b = leftmost(cases.items[j]);
+
+                if (Node_eq(a, b)) {
+                    fprintf(stderr, "this pattern is not supported by tpre yet. (check_legal() or cases)\n");
+                    exit(1);
+                }
+            }
+        }
+
+        free(cases.items);
+    }
+
+    Node* children[2];
+    Node_children(nd, children);
+    if (children[0]) check_legal(children[0]);
+    if (children[1]) check_legal(children[1]);
+}
+
+/** 0 = ok */
+int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t * errs_out)
+{
+    if (errs_out) {
+        errs_out->len = 0;
+        errs_out->items = NULL;
+    }
+
+    TkL li = lexe(str);
     Node* nd = parse(li);
     verify(nd);
     tpre_groupid_t nextgr = 1;
@@ -1137,6 +1261,7 @@ int tpre_compile(tpre_re_t* out, char const * str, DynamicList TYPES(char *) * e
     fix_0(nd);
     fix_1(nd);
     fix_2(nd);
+    check_legal(nd);
 
     memset(out, 0, sizeof(tpre_re_t));
     tpre_nodeid_t nd0 = tpre_re_resvnode(out);
@@ -1163,6 +1288,13 @@ static void tpre_dump(tpre_re_t out)
     {
         printf("%zu\t%i\t%i\t%c\t%u\n", i, out.i_ok[i], out.i_err[i], out.i_pat[i].val, out.i_backtrack[i]);
     }
+}
+
+void tpre_errs_free(tpre_errs_t errs)
+{
+    for (size_t i = 0; i < errs.len; i ++)
+        free(errs.items[i].message);
+    free(errs.items);
 }
 
 // TODO: this will break the enine: a*?b|ac
