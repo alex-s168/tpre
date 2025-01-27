@@ -63,6 +63,13 @@ void tpre_match_dump(tpre_match_t match, char const * matched_str, FILE* out);
 int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t* errs_out);
 void tpre_free(tpre_re_t re);
 
+/** output is heap allocated */
+uint8_t* tpre_serialize(tpre_re_t, size_t* len_out);
+
+/** output cannot live longer than bytes; tpre_free on the output does NOT free bytes */
+tpre_re_t tpre_deserialize(uint8_t* bytes);
+tpre_re_t tpre_deserialize_copy(uint8_t const* bytes);
+
 void tpre_errs_free(tpre_errs_t errs);
 
 #ifdef __cplusplus

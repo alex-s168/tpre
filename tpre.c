@@ -1297,5 +1297,100 @@ void tpre_errs_free(tpre_errs_t errs)
     free(errs.items);
 }
 
+struct header {
+    tpre_groupid_t max_group;
+    tpre_nodeid_t num_nodes;
+    tpre_nodeid_t first_node;
+} __attribute__ ((packed));
+
+uint8_t* tpre_serialize(tpre_re_t re, size_t* len_out)
+{
+    size_t bylen = sizeof(struct header);
+    for (size_t i = 0; i < re.num_nodes; i ++) {
+        bylen += sizeof(*re.i_ok);
+        bylen += sizeof(*re.i_err);
+        bylen += sizeof(*re.i_pat);
+        bylen += sizeof(*re.i_group);
+        bylen += sizeof(*re.i_backtrack);
+    }
+
+    *len_out = bylen;
+
+    uint8_t * buf = malloc(bylen);
+    assert(buf);
+
+    *(struct header*)buf = (struct header) {
+        .max_group = re.max_group,
+        .num_nodes = re.num_nodes,
+        .first_node = re.first_node,
+    };
+
+    uint8_t* p = buf + sizeof(struct header);
+
+#define DO(f) \
+    memcpy(p, re.f, sizeof(*re.f) * re.num_nodes); \
+    p += sizeof(*re.f) * re.num_nodes;
+
+    DO(i_ok);
+    DO(i_err);
+    DO(i_pat);
+    DO(i_group);
+    DO(i_backtrack);
+
+#undef DO
+
+    return buf;
+}
+
+tpre_re_t tpre_deserialize(uint8_t* bytes)
+{
+    struct header h = *(struct header*)bytes;
+    tpre_re_t re;
+    re.free = false;
+    re.max_group = h.max_group;
+    re.num_nodes = h.num_nodes;
+    re.first_node = h.first_node;
+
+    uint8_t* p = bytes + sizeof(struct header);
+
+#define DO(f) \
+    re.f = (void*)p; \
+    p += sizeof(*re.f) * re.num_nodes;
+
+    DO(i_ok);
+    DO(i_err);
+    DO(i_pat);
+    DO(i_group);
+    DO(i_backtrack);
+
+#undef DO
+
+    return re;
+}
+
+tpre_re_t tpre_deserialize_copy(uint8_t const* bytes)
+{
+    tpre_re_t ref = tpre_deserialize((uint8_t*)bytes);
+    tpre_re_t heap;
+    heap.free = true;
+    heap.max_group = ref.max_group;
+    heap.num_nodes = ref.num_nodes;
+    heap.first_node = ref.first_node;
+
+#define DO(f) \
+    heap.f = malloc(sizeof(*heap.f) * heap.num_nodes); \
+    memcpy(heap.f, ref.f, sizeof(*heap.f) * heap.num_nodes);
+
+    DO(i_ok);
+    DO(i_err);
+    DO(i_pat);
+    DO(i_group);
+    DO(i_backtrack);
+
+#undef DO
+
+    return heap;
+}
+
 // TODO: this will break the enine: a*?b|ac
 // TODO: this will break the engine (ab)*|(ac)*
