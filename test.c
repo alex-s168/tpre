@@ -26,14 +26,13 @@ static int test(const char* pats, const char * str, bool should_match, const cha
             return 1;
         if (m1.ngroups < 2)
             return 1;
+        if (m0.groups[1].len != strlen(group1))
+            return 1;
+        if (m1.groups[1].len != strlen(group1))
+            return 1;
         if (strncmp(buf + m0.groups[1].begin, group1, m0.groups[1].len))
             return 1;
         if (strncmp(buf + m1.groups[1].begin, group1, m1.groups[1].len))
-            return 1;
-    } else {
-        if (m0.ngroups > 1)
-            return 1;
-        if (m1.ngroups > 1)
             return 1;
     }
 
@@ -42,14 +41,13 @@ static int test(const char* pats, const char * str, bool should_match, const cha
             return 1;
         if (m1.ngroups < 3)
             return 1;
+        if (m0.groups[2].len != strlen(group2))
+            return 1;
+        if (m1.groups[2].len != strlen(group2))
+            return 1;
         if (strncmp(buf + m0.groups[2].begin, group2, m0.groups[2].len))
             return 1;
         if (strncmp(buf + m1.groups[2].begin, group2, m1.groups[2].len))
-            return 1;
-    } else {
-        if (m0.ngroups > 2)
-            return 1;
-        if (m1.ngroups > 2)
             return 1;
     }
 
@@ -63,12 +61,16 @@ int main() {
     test("\\s*?(red|green|blue)?\\s*?(car|train)\\s*?", "  red    train  ", true, "red", "train");
     test("\\s*?(red|green|blue)?\\s*?(car|train)\\s*?", "red    train", true, "red", "train");
     test("\\s*?(red|green|blue)?\\s*?(car|train)\\s*?", "  blue  car", true, "blue", "car");
+    test("\\s*?(red|green|blue)?\\s*?(car|train)\\s*?", "   car ", true, NULL, "car");
+    test("\\s*?(red|green|blue)?\\s*?(car|train)\\s*?", " train", true, NULL, "train");
     test("\\s*?(red|green|blue)?\\s*?(car|train)\\s*?", "bluecar", true, "blue", "car");
 
-    test("\\s*?(red|green|blue)?\\s+?(car|train)\\s*?", "  red    train  ", true, "red", "train");
-    test("\\s*?(red|green|blue)?\\s+?(car|train)\\s*?", "red    train", true, "red", "train");
-    test("\\s*?(red|green|blue)?\\s+?(car|train)\\s*?", "  blue  car", true, "blue", "car");
-    test("\\s*?(red|green|blue)?\\s+?(car|train)\\s*?", "bluecar", false, NULL, NULL);
+    test("\\s*?(?:(red|green|blue)\\s+?)?(car|train)\\s*?", "  red    train  ", true, "red", "train");
+    test("\\s*?(?:(red|green|blue)\\s+?)?(car|train)\\s*?", "red    train", true, "red", "train");
+    test("\\s*?(?:(red|green|blue)\\s+?)?(car|train)\\s*?", "  blue  car", true, "blue", "car");
+    test("\\s*?(?:(red|green|blue)\\s+?)?(car|train)\\s*?", "   car", true, NULL, "car");
+    test("\\s*?(?:(red|green|blue)\\s+?)?(car|train)\\s*?", "   train   ", true, NULL, "train");
+    test("\\s*?(?:(red|green|blue)\\s+?)?(car|train)\\s*?", "bluecar", false, NULL, NULL);
 
     return 0;
 }

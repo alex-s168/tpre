@@ -1,7 +1,7 @@
 #include "tpre.h"
 
 int main() {
-    const char * restr = "\\s*?(red|green|blue)?\\s*?(car|train)\\s*?";
+    const char * restr = "\\s*?(?:(red|green|blue)\\s+?)?(car|train)\\s*?";
 
     tpre_re_t re;
     tpre_errs_t errs;
@@ -36,6 +36,9 @@ int main() {
     MATCH;
 
     str = "    train    ";
+    MATCH;
+
+    str = "bluecar";
     MATCH;
 
     tpre_free(re);

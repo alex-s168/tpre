@@ -157,8 +157,10 @@ tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl)
     tpre_nodeid_t cursor = re->first_node;
     while (cursor >= 0)
     {
-        if (pattern_match(re->i_pat[cursor], str[i])) {
-            tpre_match_group_put(&match, re->i_group[cursor], str[i], i == strl ? '\0' : i);
+        if (pattern_match(re->i_pat[cursor], i >= strl ? '\0' : str[i])) {
+            if (i < strl) {
+                tpre_match_group_put(&match, re->i_group[cursor], str[i], i);
+            }
             cursor = re->i_ok[cursor];
             if (i < strl) i ++;
         } else {
@@ -900,7 +902,7 @@ static Node* parse(TkL toks) {
 
         Node* fold = NULL;
         size_t idx;
-        for (idx = 0; idx < TkL_len(&toks); idx ++) {
+        for (idx = 0; idx < (volatile size_t) TkL_len(&toks); idx ++) {
             if (!is_postfix[idx])
                 continue;
 
@@ -912,6 +914,7 @@ static Node* parse(TkL toks) {
                 ReTk ign;
                 TkL_take(&ign, &toks);
             }
+            is_postfix += idx + 1;
 
             if (fold)
                 lhs = maybeChain(fold, lhs);
@@ -931,9 +934,9 @@ static Node* parse(TkL toks) {
 
     if (isCaptureGroupOpen(firstTy)) {
         size_t nesting = 0;
-        size_t i = 0;
-        for (; i < TkL_len(&toks); i ++) {
-            ReTkTy t = TkL_get(&toks, i).ty;
+        size_t close = 0;
+        for (; close < TkL_len(&toks); close ++) {
+            ReTkTy t = TkL_get(&toks, close).ty;
             if (isCaptureGroupOpen(t)) nesting ++;
             else if (t == CaptureGroupClose) {
                 nesting --;
@@ -941,8 +944,8 @@ static Node* parse(TkL toks) {
             }
         }
 
-        Node* inner = parse(TkL_copy_range(&toks, 1, i-1));
-        Node* rem = parse(TkL_copy_range(&toks, i+1, TkL_len(&toks)-i-1));
+        Node* inner = parse(TkL_copy_range(&toks, 1, close-1));
+        Node* rem = parse(TkL_copy_range(&toks, close+1, TkL_len(&toks)-close-1));
 
         Node* self = Node_alloc();
         if (firstTy == CaptureGroupOpen) {
@@ -1228,6 +1231,7 @@ static void lower(tpre_re_t* out, tpre_nodeid_t this_id, tpre_nodeid_t on_ok, tp
         case NodeChain: {
             size_t nimatch = 0;
             tpre_nodeid_t right = tpre_re_resvnode(out);
+            assert(right != this_id);
             lower(out, this_id, right, on_error, bt, &nimatch, node->chain.a);
             if (num_match) (*num_match) += nimatch;
             lower(out, right, on_ok, on_error, bt + nimatch, num_match, node->chain.b);
@@ -1235,8 +1239,9 @@ static void lower(tpre_re_t* out, tpre_nodeid_t this_id, tpre_nodeid_t on_ok, tp
 
         case NodeOr: {
             tpre_nodeid_t right = tpre_re_resvnode(out);
-            lower(out, this_id, on_ok, right, bt, NULL, node->or.a);
-            lower(out, right, on_ok, on_error, bt, NULL, node->or.b);
+            assert(right != this_id);
+            lower(out, this_id, on_ok, right, 0, NULL, node->or.a);
+            lower(out, right, on_ok, on_error, 0, NULL, node->or.b);
         } break;
 
         case NodeMaybe: {
@@ -1302,6 +1307,36 @@ static void check_legal(Node* nd) {
     if (children[1]) check_legal(children[1]);
 }
 
+static void tpre_dump(tpre_re_t out)
+{
+    printf("nd\tok\terr\tv\tbt\n");
+    size_t i;
+    for (i = 0; i < out.num_nodes; i ++)
+    {
+        char s[3];
+        if (out.i_pat[i].is_special) {
+            s[0] = '\\';
+            switch (out.i_pat[i].val) {
+                case SPECIAL_ANY:
+                    s[1] = '*';
+                    break;
+                case SPECIAL_END:
+                    s[1] = '0';
+                    break;
+                case SPECIAL_SPACE:
+                    s[1] = 's';
+                    break;
+                default:break;
+            }
+            s[2] = '\0';
+        } else {
+            s[0] = out.i_pat[i].val;
+            s[1] = '\0';
+        }
+        printf("%zu\t%i\t%i\t%s\t%u\n", i, out.i_ok[i], out.i_err[i], s, out.i_backtrack[i]);
+    }
+}
+
 /** 0 = ok */
 int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t * errs_out)
 {
@@ -1320,9 +1355,13 @@ int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t * errs_out)
     fix_2(nd);
     check_legal(nd);
 
+    //Node_print(nd, stdout, 0, true);
+
     memset(out, 0, sizeof(tpre_re_t));
     tpre_nodeid_t nd0 = tpre_re_resvnode(out);
     lower(out, nd0, NODE_DONE, NODE_ERR, 0, NULL, nd);
+
+    //tpre_dump(*out);
 
     return 0;
 }
@@ -1335,16 +1374,6 @@ void tpre_free(tpre_re_t re)
         free(re.i_pat);
         free(re.i_group);
         free(re.i_backtrack);
-    }
-}
-
-static void tpre_dump(tpre_re_t out)
-{
-    printf("nd\tok\terr\tv\tbt\n");
-    size_t i;
-    for (i = 0; i < out.num_nodes; i ++)
-    {
-        printf("%zu\t%i\t%i\t%c\t%u\n", i, out.i_ok[i], out.i_err[i], out.i_pat[i].val, out.i_backtrack[i]);
     }
 }
 
