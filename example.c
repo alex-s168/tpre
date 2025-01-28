@@ -7,7 +7,8 @@ int main() {
     tpre_errs_t errs;
     if (tpre_compile(&re, restr, &errs) != 0) {
         fprintf(stderr, "regex compile failed:\n");
-        for (size_t i = 0; i < errs.len; i ++) {
+        size_t i;
+        for (i = 0; i < errs.len; i ++) {
             fprintf(stderr, "  %s\n", errs.items[i].message);
         }
         tpre_errs_free(errs);

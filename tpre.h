@@ -56,7 +56,13 @@ typedef struct {
 } tpre_match_t;
 
 void tpre_match_free(tpre_match_t match);
+
 tpre_match_t tpre_match(tpre_re_t const* re, const char * str);
+
+/** a tiny bit slower than tpre_match() */
+tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl);
+
+/** matched_str does not have to be mull terminated because it only prints the slices of it that match */
 void tpre_match_dump(tpre_match_t match, char const * matched_str, FILE* out);
 
 /** 0 = ok; errsOut can be null */

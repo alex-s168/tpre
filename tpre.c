@@ -118,12 +118,52 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
     while (cursor >= 0)
     {
         if (pattern_match(re->i_pat[cursor], *str)) {
-            tpre_match_group_put(&match, re->i_group[cursor], *str, str - begin_str);
+            if (*str) {
+                tpre_match_group_put(&match, re->i_group[cursor], *str, str - begin_str);
+            }
             cursor = re->i_ok[cursor];
-            if (*str) str ++;
+            if (*str) {
+                str ++;
+            }
         } else {
             tpre_backtrack_t bt = re->i_backtrack[cursor];
             str -= bt;
+            tpre_groupid_t g = re->i_group[cursor];
+            if (bt > 0) {
+                if (match.groups[g].len >= bt) {
+                    size_t n = bt;
+                    if (n > match.groups[g].len)
+                        n = match.groups[g].len;
+                    match.groups[g].len -= n;
+                }
+            }
+            cursor = re->i_err[cursor];
+        }
+    }
+
+    match.found = cursor == NODE_DONE;
+
+    return match;
+}
+
+tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl)
+{
+    tpre_match_t match;
+    match.ngroups = re->max_group + 1;
+    match.groups = calloc(sizeof(*match.groups), match.ngroups);
+
+    size_t i = 0;
+
+    tpre_nodeid_t cursor = re->first_node;
+    while (cursor >= 0)
+    {
+        if (pattern_match(re->i_pat[cursor], str[i])) {
+            tpre_match_group_put(&match, re->i_group[cursor], str[i], i == strl ? '\0' : i);
+            cursor = re->i_ok[cursor];
+            if (i < strl) i ++;
+        } else {
+            tpre_backtrack_t bt = re->i_backtrack[cursor];
+            i -= bt;
             tpre_groupid_t g = re->i_group[cursor];
             if (bt > 0) {
                 if (match.groups[g].len >= bt) {
@@ -146,7 +186,8 @@ void tpre_match_dump(tpre_match_t match, char const * matched_str, FILE* out)
 {
     if (match.found) {
         fprintf(out, "does match\n");
-        for (size_t i = 1; i < match.ngroups; i ++) {
+        size_t i;
+        for (i = 1; i < match.ngroups; i ++) {
             fprintf(out, "  group %zu: ", i);
             fwrite(matched_str + match.groups[i].begin, 1, match.groups[i].len, out);
             fprintf(out, "\n");
@@ -626,7 +667,8 @@ static Node* Node_clone(Node* node)
 static void Node_print(Node* node, FILE* file, size_t indent, bool print_grps)
 {
     if (!node) return;
-    for (size_t i = 0; i < indent * 2; i ++)
+    size_t i;
+    for (i = 0; i < indent * 2; i ++)
         fputc(' ', file);
     fprintf(file, "%s ", NodeKind_str[node->kind]);
     if (print_grps)
@@ -793,30 +835,35 @@ static Node* parse(TkL toks) {
         size_t seglen = 0;
 
         // split with nesting at ors
+        
         size_t nesting = 0;
         size_t begin = 0;
-        for (size_t i = 0; i < TkL_len(&toks); i ++) {
-            ReTkTy t = TkL_get(&toks, i).ty;
-            if (isCaptureGroupOpen(t)) nesting ++;
-            else if (t == CaptureGroupClose) nesting --;
-            else if (isOneOfOpen(t)) nesting ++;
-            else if (t == OneOfClose) nesting --;
-            if (nesting == 0 && t == OrElse) {
-                TkL tokl = TkL_copy_range(&toks, begin, i - begin);
+        {
+            size_t i;
+            for (i = 0; i < TkL_len(&toks); i ++) {
+                ReTkTy t = TkL_get(&toks, i).ty;
+                if (isCaptureGroupOpen(t)) nesting ++;
+                else if (t == CaptureGroupClose) nesting --;
+                else if (isOneOfOpen(t)) nesting ++;
+                else if (t == OneOfClose) nesting --;
+                if (nesting == 0 && t == OrElse) {
+                    TkL tokl = TkL_copy_range(&toks, begin, i - begin);
+                    seg = realloc(seg, sizeof(*seg) * (seglen+1));
+                    seg[seglen++] = tokl;
+                    begin = i + 1;
+                }
+            }
+            if (TkL_len(&toks) - begin > 0) {
+                TkL tokl = TkL_copy_range(&toks, begin, TkL_len(&toks) - begin);
                 seg = realloc(seg, sizeof(*seg) * (seglen+1));
                 seg[seglen++] = tokl;
-                begin = i + 1;
             }
-        }
-        if (TkL_len(&toks) - begin > 0) {
-            TkL tokl = TkL_copy_range(&toks, begin, TkL_len(&toks) - begin);
-            seg = realloc(seg, sizeof(*seg) * (seglen+1));
-            seg[seglen++] = tokl;
         }
 
         if (seglen >= 2) {
             Node* fold = NULL;
-            for (size_t i = 0; i < seglen; i ++) {
+            size_t i;
+            for (i = 0; i < seglen; i ++) {
                 Node* nd = parse(seg[i]);
                 if (fold == NULL)
                     fold = nd;
@@ -835,28 +882,33 @@ static Node* parse(TkL toks) {
         char* is_postfix = calloc(TkL_len(&toks), 1);
         void* is_postfix_alloc = is_postfix;
 
-        size_t nesting = 0;
-        for (size_t i = 0; i < TkL_len(&toks); i ++) {
-            ReTkTy t = TkL_get(&toks, i).ty;
-            if (isCaptureGroupOpen(t)) nesting ++;
-            else if (t == CaptureGroupClose) nesting --;
-            else if (isOneOfOpen(t)) nesting ++;
-            else if (t == OneOfClose) nesting --;
+        {
+            size_t nesting = 0;
+            size_t i;
+            for (i = 0; i < TkL_len(&toks); i ++) {
+                ReTkTy t = TkL_get(&toks, i).ty;
+                if (isCaptureGroupOpen(t)) nesting ++;
+                else if (t == CaptureGroupClose) nesting --;
+                else if (isOneOfOpen(t)) nesting ++;
+                else if (t == OneOfClose) nesting --;
 
-            if (nesting == 0 && isPostfix(t)) {
-                is_postfix[i] = true;
+                if (nesting == 0 && isPostfix(t)) {
+                    is_postfix[i] = true;
+                }
             }
         }
 
         Node* fold = NULL;
-        for (size_t idx = 0; idx < TkL_len(&toks); idx ++) {
+        size_t idx;
+        for (idx = 0; idx < TkL_len(&toks); idx ++) {
             if (!is_postfix[idx])
                 continue;
 
             ReTk op = TkL_get(&toks, idx);
             Node* lhs = parse(TkL_copy_range(&toks, 0, idx));
 
-            for (size_t i = 0; i < idx + 1; i ++) {
+            size_t i;
+            for (i = 0; i < idx + 1; i ++) {
                 ReTk ign;
                 TkL_take(&ign, &toks);
             }
@@ -902,7 +954,9 @@ static Node* parse(TkL toks) {
         } else {
             self->kind = NodeNamedCaptureGroup;
             self->named_capture.group = inner;
-            memcpy(self->named_capture.name, TkL_get(&toks, 0).group_name, 20);
+            ReTk t = TkL_get(&toks, 0);
+            char const* name = t.group_name;
+            memcpy(self->named_capture.name, name, 20);
         }
 
         TkL_free(&toks);
@@ -939,7 +993,8 @@ static Node* parse(TkL toks) {
 
         size_t len = to - from + 1;
         Node* nodes[len];
-        for (size_t i = 0; i < len; i ++)
+        size_t i;
+        for (i = 0; i < len; i ++)
             nodes[i] = genMatch(NO(from + i));
         Node* self = oneOf(nodes, len);
 
@@ -1095,7 +1150,8 @@ static void fix_1(Node* node) {
             NodeLi cases = {0};
             or_cases(orr, &cases);
             Node* mov = node->chain.b;
-            for (size_t i = 0; i < cases.len; i ++) {
+            size_t i;
+            for (i = 0; i < cases.len; i ++) {
                 Node* cas = cases.items[i];
                 Node* inner = Node_alloc();
                 memcpy(inner, cas, sizeof(Node));
@@ -1222,8 +1278,9 @@ static void check_legal(Node* nd) {
         NodeLi cases = {0};
         or_cases(nd, &cases);
 
-        for (size_t i = 0; i < cases.len; i ++) {
-            for (size_t j = 0; j < cases.len; j ++) {
+        size_t i, j;
+        for (i = 0; i < cases.len; i ++) {
+            for (j = 0; j < cases.len; j ++) {
                 if (i == j) continue;
 
                 Node* a = leftmost(cases.items[i]);
@@ -1284,7 +1341,8 @@ void tpre_free(tpre_re_t re)
 static void tpre_dump(tpre_re_t out)
 {
     printf("nd\tok\terr\tv\tbt\n");
-    for (size_t i = 0; i < out.num_nodes; i ++)
+    size_t i;
+    for (i = 0; i < out.num_nodes; i ++)
     {
         printf("%zu\t%i\t%i\t%c\t%u\n", i, out.i_ok[i], out.i_err[i], out.i_pat[i].val, out.i_backtrack[i]);
     }
@@ -1292,7 +1350,8 @@ static void tpre_dump(tpre_re_t out)
 
 void tpre_errs_free(tpre_errs_t errs)
 {
-    for (size_t i = 0; i < errs.len; i ++)
+    size_t i;
+    for (i = 0; i < errs.len; i ++)
         free(errs.items[i].message);
     free(errs.items);
 }
@@ -1306,7 +1365,8 @@ struct header {
 uint8_t* tpre_serialize(tpre_re_t re, size_t* len_out)
 {
     size_t bylen = sizeof(struct header);
-    for (size_t i = 0; i < re.num_nodes; i ++) {
+    size_t i;
+    for (i = 0; i < re.num_nodes; i ++) {
         bylen += sizeof(*re.i_ok);
         bylen += sizeof(*re.i_err);
         bylen += sizeof(*re.i_pat);
