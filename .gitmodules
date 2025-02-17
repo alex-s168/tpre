@@ -1,0 +1,3 @@
+[submodule "vxcc_v3"]
+	path = vxcc_v3
+	url = https://github.com/alex-s168/vxcc_v3

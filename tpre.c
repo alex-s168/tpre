@@ -1204,6 +1204,26 @@ static void fix_2(Node* node) {
     }
 }
 
+/** replace \s with normal nodes */
+static void fix_n1(Node* node) {
+    if (node == NULL) return;
+    Node* children[2];
+    Node_children(node, children);
+
+    fix_n1(children[0]);
+    fix_n1(children[1]);
+
+    if (node->kind == NodeMatch && node->match.is_special && node->match.val == SPECIAL_SPACE) {
+        Node* nds[] = {
+            genMatch(NO(' ')),  genMatch(NO('\t')),
+            genMatch(NO('\n')), genMatch(NO('\r')), genMatch(NO('\b')),
+        };
+        Node* inp = oneOf(nds, sizeof(nds)/sizeof(*nds));
+        *node = *inp;
+        free(inp);
+    }
+}
+
 static void lower(tpre_re_t* out, tpre_nodeid_t this_id, tpre_nodeid_t on_ok, tpre_nodeid_t on_error, tpre_backtrack_t bt, size_t* num_match, Node* node)
 {
     switch (node->kind)
@@ -1350,6 +1370,7 @@ int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t * errs_out)
     verify(nd);
     tpre_groupid_t nextgr = 1;
     groups(nd, 0, &nextgr);
+    fix_n1(nd); // TODO: only do when jit
     fix_0(nd);
     fix_1(nd);
     fix_2(nd);
