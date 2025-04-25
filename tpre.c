@@ -13,8 +13,10 @@
 #define SPECIAL_SPACE (1)
 #define SPECIAL_END   (2)
 #define SPECIAL_START (3)
-#define NO(c) ((tpre_pattern_t) {.is_special = 0,.val=(uint8_t)c})
-#define SP(c) ((tpre_pattern_t) {.is_special = 1,.val=(uint8_t)c})
+#define SPECIAL_DIGIT (4)
+#define SPECIAL_WORDC (5)
+#define NO(c) ((tpre_pattern_t) {.is_special = 0,.val=(uint8_t)c,.invert=0})
+#define SP(c) ((tpre_pattern_t) {.is_special = 1,.val=(uint8_t)c,.invert=0})
 
 
 static void tpre_re_setnode(
@@ -60,7 +62,7 @@ static void tpre_match_group_put(tpre_match_t* match, tpre_groupid_t group, char
     g->len ++;
 }
 
-static bool pattern_match(tpre_pattern_t pat, char src, bool is_begin)
+static bool pattern_match(tpre_pattern_t pat, char src, bool is_end, bool is_begin)
 {
     if (!pat.is_special) 
         return src == (char) pat.val;
@@ -68,13 +70,19 @@ static bool pattern_match(tpre_pattern_t pat, char src, bool is_begin)
     switch (pat.val)
     {
         case SPECIAL_ANY:
-            return true;
+            return src != '\n';
 
         case SPECIAL_SPACE:
             return src == ' ' || src == '\n' || src == '\t' || src == '\r';
 
+        case SPECIAL_DIGIT:
+            return src >= '0' && src <= '9';
+
+        case SPECIAL_WORDC:
+            return src >= '0' && src <= '9' || (src >= 'a' && src <= 'z') || (src >= 'A' && src <= 'Z') || src == '_';
+
         case SPECIAL_END:
-            return src == '\0';
+            return is_end;
 
         case SPECIAL_START:
             return is_begin;
@@ -95,7 +103,7 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
     tpre_nodeid_t cursor = re->first_node;
     while (cursor >= 0)
     {
-        if (pattern_match(re->i[cursor].pat, *str, begin_str == str)) {
+        if (pattern_match(re->i[cursor].pat, *str, *str == '\0', begin_str == str)) {
             if (*str) {
                 tpre_match_group_put(&match, re->i[cursor].group, *str, str - begin_str);
             }
@@ -124,30 +132,6 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
     return match;
 }
 
-static bool pattern_matchn(tpre_pattern_t pat, char src, size_t i, size_t len)
-{
-    if (!pat.is_special) 
-        return src == (char) pat.val;
-
-    switch (pat.val)
-    {
-        case SPECIAL_ANY:
-            return true;
-
-        case SPECIAL_SPACE:
-            return src == ' ' || src == '\n' || src == '\t' || src == '\r';
-
-        case SPECIAL_END:
-            return i+1 == len;
-
-        case SPECIAL_START:
-            return i == 0;
-
-        default:
-            return false;
-    }
-}
-
 tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl)
 {
     tpre_match_t match;
@@ -159,7 +143,7 @@ tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl)
     tpre_nodeid_t cursor = re->first_node;
     while (cursor >= 0)
     {
-        if (pattern_matchn(re->i[cursor].pat, str[i], i, strl)) {
+        if (pattern_match(re->i[cursor].pat, str[i], i+1 == strl, i == 0)) {
             if (i < strl) {
                 tpre_match_group_put(&match, re->i[cursor].group, str[i], i);
             }
@@ -292,6 +276,11 @@ static bool lex(ReTk* tkOut, char const* * reader)
             case 'n': m = NO('\n'); break;
             case 'f': m = NO('\f'); break;
             case 's': m = SP(SPECIAL_SPACE); break;
+            case 'S': m = SP(SPECIAL_SPACE); m.invert = 1; break;
+            case 'd': m = SP(SPECIAL_DIGIT); break;
+            case 'D': m = SP(SPECIAL_DIGIT); m.invert = 1; break;
+            case 'w': m = SP(SPECIAL_WORDC); break;
+            case 'W': m = SP(SPECIAL_WORDC); m.invert = 1; break;
             default:  m = NO(c); break;
         }
         tkOut->ty = Match;
@@ -336,6 +325,15 @@ static bool lex(ReTk* tkOut, char const* * reader)
                 tkOut->ty = CaptureGroupOpenNoCapture;
                 return true;
             }
+            else if (**reader == '#') {
+                while (**reader && **reader != ')') {
+                    (*reader) ++;
+                }
+                if (!**reader) {
+                    return false;
+                }
+                (*reader) ++;
+            }
 
             if (**reader == '\'') {
                 (*reader)++;
@@ -351,15 +349,6 @@ static bool lex(ReTk* tkOut, char const* * reader)
             }
 
             return false;
-        }
-        else if (**reader == '#') {
-            while (**reader && **reader != ')') {
-                (*reader) ++;
-            }
-            if (!**reader) {
-                return false;
-            }
-            (*reader) ++;
         }
         else {
             tkOut->ty = CaptureGroupOpen;

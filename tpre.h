@@ -16,6 +16,7 @@ typedef uint8_t tpre_backtrack_t;
 typedef struct {
     uint8_t is_special;
     uint8_t val;
+    uint8_t invert;
 } tpre_pattern_t;
 
 typedef struct {
