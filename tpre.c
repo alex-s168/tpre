@@ -12,6 +12,7 @@
 #define SPECIAL_ANY   (0)
 #define SPECIAL_SPACE (1)
 #define SPECIAL_END   (2)
+#define SPECIAL_START (3)
 #define NO(c) ((tpre_pattern_t) {.is_special = 0,.val=(uint8_t)c})
 #define SP(c) ((tpre_pattern_t) {.is_special = 1,.val=(uint8_t)c})
 
@@ -19,55 +20,29 @@
 static void tpre_re_setnode(
         tpre_re_t* re,
         tpre_nodeid_t id,
-        tpre_pattern_t   pat,
-        tpre_nodeid_t   ok,
-        tpre_nodeid_t   err,
-        tpre_backtrack_t backtrack,
-        tpre_groupid_t  group)
+        tpre_re_node_t nd)
 {
-#define do(k) \
-    re->i_##k[id] = k;
-
-    do(pat);
-    do(ok);
-    do(err);
-    do(backtrack);
-    do(group);
-
-#undef do
-
-    if (group > re->max_group) re->max_group = group;
+    re->i[id] = nd;
+    if (nd.group > re->max_group) {
+        re->max_group = nd.group;
+    }
 }
 
 static tpre_nodeid_t tpre_re_addnode(
         tpre_re_t* re,
-        tpre_pattern_t   pat,
-        tpre_nodeid_t   ok,
-        tpre_nodeid_t   err,
-        tpre_backtrack_t backtrack,
-        tpre_groupid_t  group)
+        tpre_re_node_t nd)
 {
-#define realloc(k) \
-    re->i_##k = realloc(re->i_##k, sizeof(*re->i_##k) * (re->num_nodes + 1)); \
-    assert(re->i_##k); \
-    re->i_##k[re->num_nodes] = k;
-
-    realloc(pat);
-    realloc(ok);
-    realloc(err);
-    realloc(backtrack);
-    realloc(group);
-
-#undef realloc
-
-    if (group > re->max_group) re->max_group = group;
+    re->i = realloc(re->i, sizeof(*re->i) * (re->num_nodes + 1));
+    assert(re->i);
+    re->i[re->num_nodes] = nd;
+    tpre_re_setnode(re, re->num_nodes, nd);
     re->free = true;
     return re->num_nodes ++;
 }
 
 static tpre_nodeid_t tpre_re_resvnode(tpre_re_t* re)
 {
-    return tpre_re_addnode(re, (tpre_pattern_t) {}, 0, 0, 0, 0);
+    return tpre_re_addnode(re, (tpre_re_node_t) {0});
 }
 
 void tpre_match_free(tpre_match_t match)
@@ -85,7 +60,7 @@ static void tpre_match_group_put(tpre_match_t* match, tpre_groupid_t group, char
     g->len ++;
 }
 
-static bool pattern_match(tpre_pattern_t pat, char src)
+static bool pattern_match(tpre_pattern_t pat, char src, bool is_begin)
 {
     if (!pat.is_special) 
         return src == (char) pat.val;
@@ -100,6 +75,9 @@ static bool pattern_match(tpre_pattern_t pat, char src)
 
         case SPECIAL_END:
             return src == '\0';
+
+        case SPECIAL_START:
+            return is_begin;
 
         default:
             return false;
@@ -117,18 +95,18 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
     tpre_nodeid_t cursor = re->first_node;
     while (cursor >= 0)
     {
-        if (pattern_match(re->i_pat[cursor], *str)) {
+        if (pattern_match(re->i[cursor].pat, *str, begin_str == str)) {
             if (*str) {
-                tpre_match_group_put(&match, re->i_group[cursor], *str, str - begin_str);
+                tpre_match_group_put(&match, re->i[cursor].group, *str, str - begin_str);
             }
-            cursor = re->i_ok[cursor];
+            cursor = re->i[cursor].ok;
             if (*str) {
                 str ++;
             }
         } else {
-            tpre_backtrack_t bt = re->i_backtrack[cursor];
+            tpre_backtrack_t bt = re->i[cursor].backtrack;
             str -= bt;
-            tpre_groupid_t g = re->i_group[cursor];
+            tpre_groupid_t g = re->i[cursor].group;
             if (bt > 0) {
                 if (match.groups[g].len >= bt) {
                     size_t n = bt;
@@ -137,13 +115,37 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
                     match.groups[g].len -= n;
                 }
             }
-            cursor = re->i_err[cursor];
+            cursor = re->i[cursor].err;
         }
     }
 
     match.found = cursor == NODE_DONE;
 
     return match;
+}
+
+static bool pattern_matchn(tpre_pattern_t pat, char src, size_t i, size_t len)
+{
+    if (!pat.is_special) 
+        return src == (char) pat.val;
+
+    switch (pat.val)
+    {
+        case SPECIAL_ANY:
+            return true;
+
+        case SPECIAL_SPACE:
+            return src == ' ' || src == '\n' || src == '\t' || src == '\r';
+
+        case SPECIAL_END:
+            return i+1 == len;
+
+        case SPECIAL_START:
+            return i == 0;
+
+        default:
+            return false;
+    }
 }
 
 tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl)
@@ -157,16 +159,16 @@ tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl)
     tpre_nodeid_t cursor = re->first_node;
     while (cursor >= 0)
     {
-        if (pattern_match(re->i_pat[cursor], i >= strl ? '\0' : str[i])) {
+        if (pattern_matchn(re->i[cursor].pat, str[i], i, strl)) {
             if (i < strl) {
-                tpre_match_group_put(&match, re->i_group[cursor], str[i], i);
+                tpre_match_group_put(&match, re->i[cursor].group, str[i], i);
             }
-            cursor = re->i_ok[cursor];
+            cursor = re->i[cursor].ok;
             if (i < strl) i ++;
         } else {
-            tpre_backtrack_t bt = re->i_backtrack[cursor];
+            tpre_backtrack_t bt = re->i[cursor].backtrack;
             i -= bt;
-            tpre_groupid_t g = re->i_group[cursor];
+            tpre_groupid_t g = re->i[cursor].group;
             if (bt > 0) {
                 if (match.groups[g].len >= bt) {
                     size_t n = bt;
@@ -175,7 +177,7 @@ tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl)
                     match.groups[g].len -= n;
                 }
             }
-            cursor = re->i_err[cursor];
+            cursor = re->i[cursor].err;
         }
     }
 
@@ -216,7 +218,6 @@ typedef enum {
     OneOfOpenInvert,
     OneOfClose,
     OrElse,
-    StartOfStr,
 } ReTkTy;
 
 static const char * ReTkTy_str[] = {
@@ -235,7 +236,6 @@ static const char * ReTkTy_str[] = {
     [OneOfOpenInvert] = "OneOfOpenInvert",
     [OneOfClose] = "OneOfClose",
     [OrElse] = "OrElse",
-    [StartOfStr] = "StartOfStr",
 };
 
 typedef struct {
@@ -352,9 +352,19 @@ static bool lex(ReTk* tkOut, char const* * reader)
 
             return false;
         }
-
-        tkOut->ty = CaptureGroupOpen;
-        return true;
+        else if (**reader == '#') {
+            while (**reader && **reader != ')') {
+                (*reader) ++;
+            }
+            if (!**reader) {
+                return false;
+            }
+            (*reader) ++;
+        }
+        else {
+            tkOut->ty = CaptureGroupOpen;
+            return true;
+        }
     }
 
     if (**reader == ')') {
@@ -388,7 +398,8 @@ static bool lex(ReTk* tkOut, char const* * reader)
 
     if (**reader == '^') {
         (*reader)++;
-        tkOut->ty = StartOfStr;
+        tkOut->ty = Match;
+        tkOut->match = SP(SPECIAL_START);
         return true;
     }
 
@@ -487,7 +498,6 @@ static TkL lexe(const char * src)
 
 typedef enum {
     NodeMatch,
-    NodeStartOfStr,
     NodeChain,
     NodeOr,
     NodeMaybe,
@@ -503,7 +513,6 @@ typedef enum {
 
 static const char * NodeKind_str[] = {
     [NodeMatch] = "Match",
-    [NodeStartOfStr] = "StartOfStr",
     [NodeChain] = "Chain",
     [NodeOr] = "Or",
     [NodeMaybe] = "Maybe",
@@ -557,7 +566,6 @@ static void Node_children(Node* nd, Node* childrenOut[2]) {
 
     switch (nd->kind) {
         case NodeMatch:
-        case NodeStartOfStr:
             break;
 
         case NodeChain:
@@ -619,9 +627,6 @@ static Node* Node_clone(Node* node)
     {
         case NodeMatch:
             copy->match = node->match;
-            break;
-
-        case NodeStartOfStr:
             break;
 
         case NodeChain:
@@ -699,9 +704,6 @@ static bool Node_eq(Node* a, Node* b) {
         case NodeMatch:
             return a->match.is_special == b->match.is_special &&
                 a->match.val == b->match.val;
-
-        case NodeStartOfStr:
-            return true;
 
         case NodeChain:
             return Node_eq(a->chain.a, b->chain.a)
@@ -974,15 +976,6 @@ static Node* parse(TkL toks) {
         return maybeChain(self, rem);
     }
 
-    if (firstTy == StartOfStr) {
-        Node* rem = parse(TkL_copy_range(&toks, 1, TkL_len(&toks)-1));
-        Node* self = Node_alloc();
-        self->kind = NodeStartOfStr;
-
-        TkL_free(&toks);
-        return maybeChain(self, rem);
-    }
-
     if (firstTy == MatchRange) {
         Node* rem = parse(TkL_copy_range(&toks, 1, TkL_len(&toks)-1));
 
@@ -1217,11 +1210,13 @@ static void lower(tpre_re_t* out, tpre_nodeid_t this_id, tpre_nodeid_t on_ok, tp
         case NodeMatch: {
             if (num_match) (*num_match)++;
             tpre_re_setnode(out, this_id,
-                    node->match,
-                    on_ok,
-                    on_error,
-                    bt,
-                    node->group);
+                    (tpre_re_node_t) {
+                        node->match,
+                        on_ok,
+                        on_error,
+                        bt,
+                        node->group
+                    });
         } break;
 
         case NodeLazyRepeatLeast0: {
@@ -1248,7 +1243,6 @@ static void lower(tpre_re_t* out, tpre_nodeid_t this_id, tpre_nodeid_t on_ok, tp
             lower(out, this_id, on_ok, on_ok, bt, num_match, node->maybe);
         } break;
 
-        case NodeStartOfStr:
         default:
             assert(false && "bruh");
             break;
@@ -1314,9 +1308,9 @@ static void tpre_dump(tpre_re_t out)
     for (i = 0; i < out.num_nodes; i ++)
     {
         char s[3];
-        if (out.i_pat[i].is_special) {
+        if (out.i[i].pat.is_special) {
             s[0] = '\\';
-            switch (out.i_pat[i].val) {
+            switch (out.i[i].pat.val) {
                 case SPECIAL_ANY:
                     s[1] = '*';
                     break;
@@ -1330,10 +1324,10 @@ static void tpre_dump(tpre_re_t out)
             }
             s[2] = '\0';
         } else {
-            s[0] = out.i_pat[i].val;
+            s[0] = out.i[i].pat.val;
             s[1] = '\0';
         }
-        printf("%zu\t%i\t%i\t%s\t%u\n", i, out.i_ok[i], out.i_err[i], s, out.i_backtrack[i]);
+        printf("%zu\t%i\t%i\t%s\t%u\n", i, out.i[i].ok, out.i[i].err, s, out.i[i].backtrack);
     }
 }
 
@@ -1369,11 +1363,7 @@ int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t * errs_out)
 void tpre_free(tpre_re_t re)
 {
     if (re.free) {
-        free(re.i_ok);
-        free(re.i_err);
-        free(re.i_pat);
-        free(re.i_group);
-        free(re.i_backtrack);
+        free(re.i);
     }
 }
 
@@ -1383,102 +1373,6 @@ void tpre_errs_free(tpre_errs_t errs)
     for (i = 0; i < errs.len; i ++)
         free(errs.items[i].message);
     free(errs.items);
-}
-
-struct header {
-    tpre_groupid_t max_group;
-    tpre_nodeid_t num_nodes;
-    tpre_nodeid_t first_node;
-} __attribute__ ((packed));
-
-uint8_t* tpre_serialize(tpre_re_t re, size_t* len_out)
-{
-    size_t bylen = sizeof(struct header);
-    size_t i;
-    for (i = 0; i < re.num_nodes; i ++) {
-        bylen += sizeof(*re.i_ok);
-        bylen += sizeof(*re.i_err);
-        bylen += sizeof(*re.i_pat);
-        bylen += sizeof(*re.i_group);
-        bylen += sizeof(*re.i_backtrack);
-    }
-
-    *len_out = bylen;
-
-    uint8_t * buf = malloc(bylen);
-    assert(buf);
-
-    *(struct header*)buf = (struct header) {
-        .max_group = re.max_group,
-        .num_nodes = re.num_nodes,
-        .first_node = re.first_node,
-    };
-
-    uint8_t* p = buf + sizeof(struct header);
-
-#define DO(f) \
-    memcpy(p, re.f, sizeof(*re.f) * re.num_nodes); \
-    p += sizeof(*re.f) * re.num_nodes;
-
-    DO(i_ok);
-    DO(i_err);
-    DO(i_pat);
-    DO(i_group);
-    DO(i_backtrack);
-
-#undef DO
-
-    return buf;
-}
-
-tpre_re_t tpre_deserialize(uint8_t* bytes)
-{
-    struct header h = *(struct header*)bytes;
-    tpre_re_t re;
-    re.free = false;
-    re.max_group = h.max_group;
-    re.num_nodes = h.num_nodes;
-    re.first_node = h.first_node;
-
-    uint8_t* p = bytes + sizeof(struct header);
-
-#define DO(f) \
-    re.f = (void*)p; \
-    p += sizeof(*re.f) * re.num_nodes;
-
-    DO(i_ok);
-    DO(i_err);
-    DO(i_pat);
-    DO(i_group);
-    DO(i_backtrack);
-
-#undef DO
-
-    return re;
-}
-
-tpre_re_t tpre_deserialize_copy(uint8_t const* bytes)
-{
-    tpre_re_t ref = tpre_deserialize((uint8_t*)bytes);
-    tpre_re_t heap;
-    heap.free = true;
-    heap.max_group = ref.max_group;
-    heap.num_nodes = ref.num_nodes;
-    heap.first_node = ref.first_node;
-
-#define DO(f) \
-    heap.f = malloc(sizeof(*heap.f) * heap.num_nodes); \
-    memcpy(heap.f, ref.f, sizeof(*heap.f) * heap.num_nodes);
-
-    DO(i_ok);
-    DO(i_err);
-    DO(i_pat);
-    DO(i_group);
-    DO(i_backtrack);
-
-#undef DO
-
-    return heap;
 }
 
 // TODO: this will break the enine: a*?b|ac

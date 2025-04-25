@@ -29,16 +29,19 @@ typedef struct {
 } tpre_errs_t;
 
 typedef struct {
+    tpre_pattern_t   pat;
+    tpre_nodeid_t    ok, err;
+    tpre_backtrack_t backtrack;
+    tpre_groupid_t   group;
+} tpre_re_node_t;
+
+typedef struct {
     bool free;
     tpre_nodeid_t num_nodes;
     tpre_nodeid_t first_node;
     tpre_groupid_t max_group;
 
-    tpre_pattern_t  * i_pat;
-    tpre_nodeid_t   * i_ok;
-    tpre_nodeid_t   * i_err;
-    tpre_backtrack_t* i_backtrack;
-    tpre_groupid_t  * i_group;
+    tpre_re_node_t *i;
 } tpre_re_t;
 
 typedef int32_t tpre_src_loc_t;
@@ -68,13 +71,6 @@ void tpre_match_dump(tpre_match_t match, char const * matched_str, FILE* out);
 /** 0 = ok; errsOut can be null */
 int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t* errs_out);
 void tpre_free(tpre_re_t re);
-
-/** output is heap allocated */
-uint8_t* tpre_serialize(tpre_re_t, size_t* len_out);
-
-/** output cannot live longer than bytes; tpre_free on the output does NOT free bytes */
-tpre_re_t tpre_deserialize(uint8_t* bytes);
-tpre_re_t tpre_deserialize_copy(uint8_t const* bytes);
 
 void tpre_errs_free(tpre_errs_t errs);
 
