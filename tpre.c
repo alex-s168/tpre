@@ -93,11 +93,23 @@ static bool pattern_match(tpre_pattern_t pat, char src, bool is_end, bool is_beg
     }
 }
 
-tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
+static tpre_match_t init_match(tpre_re_t const* re)
 {
-    tpre_match_t match;
+    tpre_match_t match = {0};
     match.ngroups = re->max_group + 1;
     match.groups = calloc(sizeof(*match.groups), match.ngroups);
+
+    for (size_t i = 0; i < re->num_named_groups; i ++)
+    {
+        match.groups[re->first_named_group + i].opt_name = re->named_groups[i];
+    }
+
+    return match;
+}
+
+tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
+{
+    tpre_match_t match = init_match(re);
 
     const char * begin_str = str;
 
@@ -135,9 +147,7 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char * str)
 
 tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl)
 {
-    tpre_match_t match;
-    match.ngroups = re->max_group + 1;
-    match.groups = calloc(sizeof(*match.groups), match.ngroups);
+    tpre_match_t match = init_match(re);
 
     size_t i = 0;
 
@@ -173,18 +183,39 @@ tpre_match_t tpre_matchn(tpre_re_t const* re, const char * str, size_t strl)
 
 void tpre_match_dump(tpre_match_t match, char const * matched_str, FILE* out)
 {
-    if (match.found) {
+    if (match.found)
+    {
         fprintf(out, "does match\n");
         size_t i;
-        for (i = 1; i < match.ngroups; i ++) {
-            fprintf(out, "  group %zu: ", i);
-            fwrite(matched_str + match.groups[i].begin, 1, match.groups[i].len, out);
+        for (i = 1; i < match.ngroups; i ++)
+        {
+            tpre_group_t group = match.groups[i];
+
+            if (group.opt_name) {
+                fprintf(out, "  group '%s': ", group.opt_name);
+            } else {
+                fprintf(out, "  group %zu: ", i);
+            }
+            fwrite(matched_str + group.begin, 1, group.len, out);
             fprintf(out, "\n");
         }
     }
     else {
         fprintf(out, "does not match\n");
     }
+}
+
+tpre_group_t const* tpre_match_find_group(tpre_match_t match, char const* name)
+{
+    for (size_t i = 0; i < match.ngroups; i ++)
+    {
+        if (match.groups[i].opt_name && !strcmp(match.groups[i].opt_name, name))
+        {
+            return &match.groups[i];
+        }
+    }
+
+    return NULL;
 }
 
 typedef enum {
@@ -757,6 +788,10 @@ static void Node_print(Node* node, FILE* file, size_t indent, bool print_grps)
             else fprintf(file, "(%c)", (char) pat.val);
         } break;
 
+        case NodeNamedCaptureGroup: {
+            fprintf(file, "(%s)", node->named_capture.name);
+        } break;
+
         case NodeNamedBackref: {
             fprintf(file, "(%s)", node->named_backref.name);
         } break;
@@ -1183,37 +1218,90 @@ static void verify(Node* nd) {
     verify(children[0]);
     verify(children[1]);
 
-    if (nd->kind == NodeNamedCaptureGroup) {
-        fprintf(stderr, "named capture groups not supported\n");
-        exit(1);
-    }
-
     if (nd->kind == NodeRepeatLeast0 || nd->kind == NodeRepeatLeast1) {
         fprintf(stderr, "only lazy repeats supported\n");
         exit(1);
     }
 }
 
-static void groups(Node* nd, tpre_groupid_t group, tpre_groupid_t* global_next_group_id) {
+static size_t count_groups(Node* nd)
+{
+    if (nd == NULL) return 0;
+
+    Node* children[2];
+    Node_children(nd, children);
+
+    size_t count = 0;
+
+    if (nd->kind == NodeCaptureGroup) {
+        count += 1;
+    }
+
+    count += count_groups(children[0]);
+    count += count_groups(children[1]);
+
+    return count;
+}
+
+static size_t count_named_groups(Node* nd)
+{
+    if (nd == NULL) return 0;
+
+    Node* children[2];
+    Node_children(nd, children);
+
+    size_t count = 0;
+
+    if (nd->kind == NodeNamedCaptureGroup) {
+        count += 1;
+    }
+
+    count += count_named_groups(children[0]);
+    count += count_named_groups(children[1]);
+
+    return count;
+}
+
+static void named_groups(Node* nd, char*** out) {
+    if (nd == NULL) return;
+    Node* children[2];
+    Node_children(nd, children);
+
+    if (nd->kind == NodeNamedCaptureGroup) {
+        **out = strdup(nd->named_capture.name);
+        (*out) ++;
+    }
+
+    named_groups(children[0], out);
+    named_groups(children[1], out);
+}
+
+static void groups(Node* nd, tpre_groupid_t group, tpre_groupid_t* global_next_group_id, tpre_groupid_t* next_named_gr) {
     if (nd == NULL) return;
     Node* children[2];
     Node_children(nd, children);
 
     if (nd->kind == NodeJustGroup) {
         memcpy(nd, nd->just_group, sizeof(Node));
-        groups(nd, group, global_next_group_id);
+        groups(nd, group, global_next_group_id, next_named_gr);
         return;
     }
 
     if (nd->kind == NodeCaptureGroup) {
         memcpy(nd, nd->capture, sizeof(Node));
-        groups(nd, (*global_next_group_id)++, global_next_group_id);
+        groups(nd, (*global_next_group_id)++, global_next_group_id, next_named_gr);
+        return;
+    }
+
+    if (nd->kind == NodeNamedCaptureGroup) {
+        memcpy(nd, nd->named_capture.group, sizeof(Node));
+        groups(nd, (*next_named_gr)++, global_next_group_id, next_named_gr);
         return;
     }
 
     nd->group = group;
-    groups(children[0], group, global_next_group_id);
-    groups(children[1], group, global_next_group_id);
+    groups(children[0], group, global_next_group_id, next_named_gr);
+    groups(children[1], group, global_next_group_id, next_named_gr);
 }
 
 /** convert RepeatLazyLeast1 to RepeatLazyLeast0 */
@@ -1303,6 +1391,7 @@ static void fix_2(Node* node) {
 
 static void lower(tpre_re_t* out, tpre_nodeid_t this_id, tpre_nodeid_t on_ok, tpre_nodeid_t on_error, tpre_backtrack_t bt, size_t* num_match, Node* node)
 {
+    assert(node);
     switch (node->kind)
     {
         case NodeLazyRepeatLeast1:
@@ -1348,6 +1437,7 @@ static void lower(tpre_re_t* out, tpre_nodeid_t this_id, tpre_nodeid_t on_ok, tp
         } break;
 
         default:
+            printf("%s\n", NodeKind_str[node->kind]);
             assert(false && "bruh");
             break;
     }
@@ -1438,6 +1528,8 @@ static void tpre_dump(tpre_re_t out)
 /** 0 = ok */
 int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t * errs_out)
 {
+    memset(out, 0, sizeof(tpre_re_t));
+
     if (errs_out) {
         errs_out->len = 0;
         errs_out->items = NULL;
@@ -1446,8 +1538,24 @@ int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t * errs_out)
     TkL li = lexe(str);
     Node* nd = parse(li);
     verify(nd);
+
+
+    {
+    size_t num_groups = count_groups(nd);
+    size_t num_named_groups = count_named_groups(nd);
+
+    out->first_named_group = num_groups + 1;
+    out->num_named_groups = num_named_groups;
+    out->named_groups = malloc(sizeof(char*) * num_named_groups);
+    char** named_groups_ptr = out->named_groups;
+    named_groups(nd, &named_groups_ptr);
+
     tpre_groupid_t nextgr = 1;
-    groups(nd, 0, &nextgr);
+    tpre_groupid_t next_named_gr = out->first_named_group;
+    groups(nd, 0, &nextgr, &next_named_gr);
+    }
+
+
     fix_0(nd);
     fix_1(nd);
     fix_2(nd);
@@ -1455,7 +1563,6 @@ int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t * errs_out)
 
     //Node_print(nd, stdout, 0, true);
 
-    memset(out, 0, sizeof(tpre_re_t));
     tpre_nodeid_t nd0 = tpre_re_resvnode(out);
     lower(out, nd0, NODE_DONE, NODE_ERR, 0, NULL, nd);
 
@@ -1467,6 +1574,10 @@ int tpre_compile(tpre_re_t* out, char const * str, tpre_errs_t * errs_out)
 void tpre_free(tpre_re_t re)
 {
     if (re.free) {
+        for (size_t i = 0; i < re.num_named_groups; i ++) {
+            free(re.named_groups[i]);
+        }
+        free(re.named_groups);
         free(re.i);
     }
 }
@@ -1481,16 +1592,3 @@ void tpre_errs_free(tpre_errs_t errs)
 
 // TODO: this will break the enine: a*?b|ac
 // TODO: this will break the engine (ab)*|(ac)*
-
-/*
-int main() {
-    TkL li;
-    li = lexe("he(?'name d group'yolo)llo\\g{hello-world}wo\\1rld");
-    for (size_t i = 0; i < li.len; i ++) {
-        ReTk_dump(li.tokens[i], stdout);
-        putc(' ', stdout);
-    }
-    printf("\n");
-    Node* nd = parse(li);
-    Node_print(nd, stdout, 0, 1);
-}*/

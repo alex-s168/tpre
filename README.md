@@ -70,6 +70,11 @@ example: `hi|bye` matches either `hi` or `bye`
 ### capture group
 example: `([a-zA-Z]+)` matches `Alex`, and stores `Alex` in the next capture group ID, beginning with 1.
 
+### named capture group
+example: `(?'name'[a-zA-Z]+)` matches `Alex`, and stores `Alex` in the capture group `name`.
+
+the limit on name length is 20 chars.
+
 ### anchors
 example: `^` matches beginning of string.
 
