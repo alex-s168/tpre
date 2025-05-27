@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -202,6 +203,8 @@ typedef enum {
     OneOfOpenInvert,
     OneOfClose,
     OrElse,
+    BackrefId,
+    BackrefName,
 } ReTkTy;
 
 static const char * ReTkTy_str[] = {
@@ -220,6 +223,8 @@ static const char * ReTkTy_str[] = {
     [OneOfOpenInvert] = "OneOfOpenInvert",
     [OneOfClose] = "OneOfClose",
     [OrElse] = "OrElse",
+    [BackrefId] = "BackrefId",
+    [BackrefName] = "BackrefName",
 };
 
 typedef struct {
@@ -227,6 +232,7 @@ typedef struct {
     union {
         tpre_pattern_t match;
         char group_name[20];
+        tpre_groupid_t group_id;
         struct { char from, to; } range;
     };
 } ReTk;
@@ -242,8 +248,18 @@ static void ReTk_dump(ReTk tk, FILE* out)
         fprintf(out, "(%s)", tk.group_name);
     } else if (tk.ty == MatchRange) {
         fprintf(out, "(%c-%c)", tk.range.from, tk.range.to);
+    } else if (tk.ty == BackrefId) {
+        fprintf(out, "(%u)", tk.group_id);
+    } else if (tk.ty == BackrefName) {
+        fprintf(out, "(%s)", tk.group_name);
     }
 }
+
+// "UNDOCUMENTED" SYNTAX:
+//
+//  backref to group 39:   \39
+//  backref to group 39:   \g{39}
+//  backref to group hey:  \g{hey}
 
 static bool lex(ReTk* tkOut, char const* * reader)
 {
@@ -268,24 +284,67 @@ static bool lex(ReTk* tkOut, char const* * reader)
     if (**reader == '\\') {
         (*reader)++;
         char c = **reader;
-        (*reader)++;
-        tpre_pattern_t m;
-        switch (c) {
-            case 't': m = NO('\t'); break;
-            case 'r': m = NO('\r'); break;
-            case 'n': m = NO('\n'); break;
-            case 'f': m = NO('\f'); break;
-            case 's': m = SP(SPECIAL_SPACE); break;
-            case 'S': m = SP(SPECIAL_SPACE); m.invert = 1; break;
-            case 'd': m = SP(SPECIAL_DIGIT); break;
-            case 'D': m = SP(SPECIAL_DIGIT); m.invert = 1; break;
-            case 'w': m = SP(SPECIAL_WORDC); break;
-            case 'W': m = SP(SPECIAL_WORDC); m.invert = 1; break;
-            default:  m = NO(c); break;
+
+        if (isdigit(c)) {
+            // backreference
+            long num = strtol(*reader, (char**) reader, 10);
+            tkOut->ty = BackrefId;
+            tkOut->group_id = (tpre_groupid_t) num;
+            return true;
         }
-        tkOut->ty = Match;
-        tkOut->match = m;
-        return true;
+        else if (c == 'g') {
+            (*reader)++;
+            // also backreference
+            if (**reader != '{')
+                return false;
+            (*reader)++;
+            if (**reader == '+' || **reader == '-') // not yet implemented
+                return false;
+
+            char const* begin = *reader;
+            char const* close = strchr(*reader, '}');
+            if (!close)
+                return false;
+            *reader = close + 1;
+            size_t len = close - begin;
+
+            if (isdigit(*begin)) {
+                char* end;
+                long num = strtol(begin, &end, 10);
+                if (end != begin + len)
+                    return false;
+                tkOut->ty = BackrefId;
+                tkOut->group_id = (tpre_groupid_t) num;
+                return true;
+            } else {
+                if (len >= sizeof(tkOut->group_name))
+                    return false;
+                tkOut->ty = BackrefName;
+                memcpy(tkOut->group_name, begin, len);
+                tkOut->group_name[len] = '\0';
+                return true;
+            }
+        }
+        else {
+            (*reader)++;
+            tpre_pattern_t m;
+            switch (c) {
+                case 't': m = NO('\t'); break;
+                case 'r': m = NO('\r'); break;
+                case 'n': m = NO('\n'); break;
+                case 'f': m = NO('\f'); break;
+                case 's': m = SP(SPECIAL_SPACE); break;
+                case 'S': m = SP(SPECIAL_SPACE); m.invert = 1; break;
+                case 'd': m = SP(SPECIAL_DIGIT); break;
+                case 'D': m = SP(SPECIAL_DIGIT); m.invert = 1; break;
+                case 'w': m = SP(SPECIAL_WORDC); break;
+                case 'W': m = SP(SPECIAL_WORDC); m.invert = 1; break;
+                default:  m = NO(c); break;
+            }
+            tkOut->ty = Match;
+            tkOut->match = m;
+            return true;
+        }
     }
 
     if (**reader == '*') {
@@ -334,15 +393,17 @@ static bool lex(ReTk* tkOut, char const* * reader)
                 }
                 (*reader) ++;
             }
-
-            if (**reader == '\'') {
+            else if (**reader == '\'') {
                 (*reader)++;
                 const char * begin = *reader;
                 tkOut->ty = CaptureGroupOpenNamed;
-                for (; **reader && **reader != '\''; reader ++);
+                for (; **reader && **reader != '\''; (*reader) ++);
                 size_t len = *reader - begin;
-                if (**reader) (*reader)++;
-                if (len > 19) len = 19;
+                if (!**reader)
+                    return false;
+                (*reader)++;
+                if (len >= sizeof(tkOut->group_name))
+                    return false;
                 memcpy(tkOut->group_name, begin, len);
                 tkOut->group_name[len] = '\0';
                 return true;
@@ -498,6 +559,8 @@ typedef enum {
     NodeJustGroup,
     NodeCaptureGroup,
     NodeNamedCaptureGroup,
+    NodeBackref,
+    NodeNamedBackref,
 } NodeKind;
 
 static const char * NodeKind_str[] = {
@@ -513,6 +576,8 @@ static const char * NodeKind_str[] = {
     [NodeJustGroup] = "JustGroup",
     [NodeCaptureGroup] = "CaptureGroup",
     [NodeNamedCaptureGroup] = "NamedCaptureGroup",
+    [NodeBackref] = "Backref",
+    [NodeNamedBackref] = "NamedBackref",
 };
 
 typedef struct Node Node;
@@ -542,6 +607,12 @@ struct Node {
             char name[20];
             Node* group;
         } named_capture;
+
+        tpre_groupid_t backref;
+
+        struct {
+            char name[20];
+        } named_backref;
     };
 };
 
@@ -555,6 +626,8 @@ static void Node_children(Node* nd, Node* childrenOut[2]) {
 
     switch (nd->kind) {
         case NodeMatch:
+        case NodeBackref:
+        case NodeNamedBackref:
             break;
 
         case NodeChain:
@@ -655,6 +728,14 @@ static Node* Node_clone(Node* node)
             copy->named_capture.group = Node_clone(node->named_capture.group);
             memcpy(copy->named_capture.name, node->named_capture.name, 20);
             break;
+
+        case NodeNamedBackref:
+            memcpy(copy->named_backref.name, node->named_backref.name, 20);
+            break;
+
+        case NodeBackref:
+            copy->backref = node->backref;
+            break;
     }
 
     return copy;
@@ -674,6 +755,14 @@ static void Node_print(Node* node, FILE* file, size_t indent, bool print_grps)
             tpre_pattern_t pat = node->match;
             if (pat.is_special) fprintf(file, "(special: %u)", pat.val);
             else fprintf(file, "(%c)", (char) pat.val);
+        } break;
+
+        case NodeNamedBackref: {
+            fprintf(file, "(%s)", node->named_backref.name);
+        } break;
+
+        case NodeBackref: {
+            fprintf(file, "(%u)", node->backref);
         } break;
 
         default: break;
@@ -723,6 +812,12 @@ static bool Node_eq(Node* a, Node* b) {
         case NodeNamedCaptureGroup:
             return Node_eq(a->named_capture.group, b->named_capture.group) &&
                 !strcmp(a->named_capture.name, b->named_capture.name);
+
+        case NodeNamedBackref:
+            return !strcmp(a->named_backref.name, b->named_backref.name);
+
+        case NodeBackref:
+            return a->backref == b->backref;
     }
 }
 
@@ -982,6 +1077,26 @@ static Node* parse(TkL toks) {
         for (i = 0; i < len; i ++)
             nodes[i] = genMatch(NO(from + i));
         Node* self = oneOf(nodes, len);
+
+        TkL_free(&toks);
+        return maybeChain(self, rem);
+    }
+
+    if (firstTy == BackrefId) {
+        Node* rem = parse(TkL_copy_range(&toks, 1, TkL_len(&toks)-1));
+        Node* self = Node_alloc();
+        self->kind = NodeBackref;
+        self->backref = TkL_get(&toks, 0).group_id;
+
+        TkL_free(&toks);
+        return maybeChain(self, rem);
+    }
+
+    if (firstTy == BackrefName) {
+        Node* rem = parse(TkL_copy_range(&toks, 1, TkL_len(&toks)-1));
+        Node* self = Node_alloc();
+        self->kind = NodeNamedBackref;
+        memcpy(self->named_backref.name, TkL_get(&toks, 0).group_name, 20);
 
         TkL_free(&toks);
         return maybeChain(self, rem);
@@ -1366,3 +1481,16 @@ void tpre_errs_free(tpre_errs_t errs)
 
 // TODO: this will break the enine: a*?b|ac
 // TODO: this will break the engine (ab)*|(ac)*
+
+/*
+int main() {
+    TkL li;
+    li = lexe("he(?'name d group'yolo)llo\\g{hello-world}wo\\1rld");
+    for (size_t i = 0; i < li.len; i ++) {
+        ReTk_dump(li.tokens[i], stdout);
+        putc(' ', stdout);
+    }
+    printf("\n");
+    Node* nd = parse(li);
+    Node_print(nd, stdout, 0, 1);
+}*/
