@@ -1,3 +1,5 @@
+/.cache/
+/build/
 *.exe
 *.out
 *.gen.*

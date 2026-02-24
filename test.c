@@ -1,4 +1,4 @@
-#include "tpre.h"
+#include "include/tpre.h"
 #include <string.h>
 
 static int test(const char* pats, const char * str, bool should_match, const char* group1, const char* group2)
