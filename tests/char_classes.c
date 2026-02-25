@@ -34,6 +34,23 @@ int main()
   m = match("[ab(cd)e*+]", "!", (tpre_opts_t) { 0 });
   assert(!m.found);
 
+  // regression 1
+  m = match("(a)", "", (tpre_opts_t) { 0 });
+  assert(!m.found);
+  m = match(
+      "(a)", "",
+      (tpre_opts_t) {
+        .start_unanchored = 1, .end_unanchored = 1 });
+  assert(!m.found);
+
+  // regression 2
+
+  m = match(
+      "((?:(?:a(?:a?)))$)", "bba",
+      (tpre_opts_t) {
+        .start_unanchored = 1, .end_unanchored = 1 });
+  assert(!m.found);
+
   // anchored
   m = match("abc", "abc  ", (tpre_opts_t) { 0 });
   assert(!m.found);

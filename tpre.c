@@ -154,7 +154,7 @@ pattern_match(tpre_pattern_t pat, char src, bool is_begin)
 
   switch (pat.val)
   {
-    case SPECIAL_ANY: return src != '\n' ? 1 : -1;
+    case SPECIAL_ANY: return src != '\0' ? 1 : -1;
 
     case SPECIAL_SPACE:
       return (src == ' ' || src == '\n' || src == '\t' ||
@@ -204,8 +204,11 @@ tpre_matchn(tpre_re_t const* re, const char* str, size_t strl)
   {
     while (cursor >= 0)
     {
+      if (cursor >= re->num_nodes)
+        return match;
+
       int m = pattern_match(
-          re->i[cursor].pat, i == strl ? '\0' : str[i], i == 0);
+          re->i[cursor].pat, i >= strl ? '\0' : str[i], i == 0);
       if (m == -2)
       {
         // TODO: can do this more efficiently: can reuse memory from dups
@@ -1877,7 +1880,7 @@ static int check_legal(tpre_errs_t* errs, Node* nd)
 static void tpre_dump(tpre_re_t out)
 {
   printf("start = %i\n", out.first_node);
-  printf("nd\tok\terr\tv\tbt\n");
+  printf("nd\tok\terr\tv\tbt\tg\n");
   size_t i;
   for (i = 0; i < out.num_nodes; i++)
   {
@@ -1902,9 +1905,10 @@ static void tpre_dump(tpre_re_t out)
       s[1] = '\0';
     }
     printf(
-        "%zu\t%i\t%i\t%s\t%u\n", i, out.i[i].ok, out.i[i].err, s,
-        out.i[i].backtrack);
+        "%zu\t%i\t%i\t%s\t%u\t%u\n", i, out.i[i].ok,
+        out.i[i].err, s, out.i[i].backtrack, out.i[i].group);
   }
+  fflush(stdout);
 }
 
 int tpre_compile(
@@ -1960,39 +1964,38 @@ int tpre_compile(
     groups(nd, 0, &nextgr, &next_named_gr);
   } while (0);
 
+  if (opts.start_unanchored)
+  {
+    Node* any = Node_alloc();
+    any->kind = NodeMatch;
+    any->match = SP(SPECIAL_ANY);
+
+    Node* rep = Node_alloc();
+    rep->kind = NodeLazyRepeatLeast0;
+    rep->repeat = any;
+
+    nd = maybeChain(rep, nd);
+  }
+
   fix_0(nd);
   fix_1(nd);
   fix_2(nd);
   if (check_legal(errs_out, nd))
     status = 1;
 
-  // Node_print(nd, stdout, 0, true);
+  Node_print(nd, stdout, 0, true);
 
   tpre_nodeid_t nd0 = tpre_re_resvnode(out);
   tpre_nodeid_t err = NODE_ERR;
 
-  if (opts.start_unanchored)
-  {
-    out->first_node = nd0;
-    // loop until start:
-    err = tpre_re_addnode(
-        out,
-        (tpre_re_node_t) {
-          .pat = SP(SPECIAL_ANY),
-          .ok = nd0,
-          .err = NODE_ERR,
-          .backtrack = 0,
-          .group = 0,
-        });
-  }
-  else
+  if (!opts.start_unanchored)
   {
     tpre_nodeid_t anchor = tpre_re_addnode(
         out,
         (tpre_re_node_t) {
           .pat = SP(SPECIAL_START),
           .ok = nd0,
-          .err = NODE_ERR,
+          .err = err,
           .backtrack = 0,
           .group = 0,
         });
