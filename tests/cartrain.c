@@ -17,26 +17,16 @@ static int test(
   static char buf[200];
   memcpy(buf, str, strlen(str));
 
-  tpre_match_t m0 = tpre_match(&pat, str);
   tpre_match_t m1 = tpre_matchn(&pat, buf, strlen(str));
-
-  if (m0.found != should_match)
-    return 1;
 
   if (m1.found != should_match)
     return 1;
 
   if (group1)
   {
-    if (m0.ngroups < 2)
-      return 1;
     if (m1.ngroups < 2)
       return 1;
-    if (m0.groups[1].len != strlen(group1))
-      return 1;
     if (m1.groups[1].len != strlen(group1))
-      return 1;
-    if (strncmp(buf + m0.groups[1].begin, group1, m0.groups[1].len))
       return 1;
     if (strncmp(buf + m1.groups[1].begin, group1, m1.groups[1].len))
       return 1;
@@ -44,15 +34,9 @@ static int test(
 
   if (group2)
   {
-    if (m0.ngroups < 3)
-      return 1;
     if (m1.ngroups < 3)
       return 1;
-    if (m0.groups[2].len != strlen(group2))
-      return 1;
     if (m1.groups[2].len != strlen(group2))
-      return 1;
-    if (strncmp(buf + m0.groups[2].begin, group2, m0.groups[2].len))
       return 1;
     if (strncmp(buf + m1.groups[2].begin, group2, m1.groups[2].len))
       return 1;

@@ -34,15 +34,26 @@ example: `\n` to match a line break
 ### escaped char
 example: `\.` to match a literal `.`
 
-### repeated
+### lazy repeat
 match the previous pattern repeated, until the next pattern matches.
 
 example: `h*?i` to match for example `hhhhhhhi`
 
-### repeated at least once
+### lazy repeat least once
 match the previous pattern repeated (at least one time), until the next pattern matches.
 
 example: `h+?i` to match for example `hhhhhhhi`
+
+### greedy repeat
+match the previous pattern as many times as possible, then step back by one match until the next pattern matches.
+
+example: `h*hi` to match for example `hhhhhhhi`
+
+### greedy repeat least once
+match the previous pattern as many times as possible, then step back by one match until the next pattern matches,
+but the previous pattern needs to match at least one time.
+
+example: `h+i` to match for example `hhhhhhhi`
 
 ### optional
 try to match the previous pattern.

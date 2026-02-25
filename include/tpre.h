@@ -79,9 +79,6 @@ typedef struct
   tpre_group_t* groups;
 } tpre_match_t;
 
-tpre_match_t tpre_match(tpre_re_t const* re, const char* str);
-
-/** a tiny bit slower than tpre_match() */
 tpre_match_t
 tpre_matchn(tpre_re_t const* re, const char* str, size_t strl);
 

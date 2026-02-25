@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 #include "include/tpre.h"
 
 static void compile(tpre_re_t* out, char const* str)
@@ -26,9 +27,9 @@ static void simple_groups()
   tpre_match_t m;
   char const* str;
 
-#define MATCH                           \
-  m = tpre_match(&re, str);             \
-  tpre_match_dump(&re, m, str, stdout); \
+#define MATCH                             \
+  m = tpre_matchn(&re, str, strlen(str)); \
+  tpre_match_dump(&re, m, str, stdout);   \
   tpre_match_free(m);
 
   str = "blue car";
@@ -66,9 +67,9 @@ static void named_groups()
   tpre_match_t m;
   char const* str;
 
-#define MATCH                           \
-  m = tpre_match(&re, str);             \
-  tpre_match_dump(&re, m, str, stdout); \
+#define MATCH                             \
+  m = tpre_matchn(&re, str, strlen(str)); \
+  tpre_match_dump(&re, m, str, stdout);   \
   tpre_match_free(m);
 
   str = "blue car";
@@ -105,9 +106,9 @@ static void named_and_simple_groups()
   tpre_match_t m;
   char const* str;
 
-#define MATCH                           \
-  m = tpre_match(&re, str);             \
-  tpre_match_dump(&re, m, str, stdout); \
+#define MATCH                             \
+  m = tpre_matchn(&re, str, strlen(str)); \
+  tpre_match_dump(&re, m, str, stdout);   \
   tpre_match_free(m);
 
   str = "blue car";

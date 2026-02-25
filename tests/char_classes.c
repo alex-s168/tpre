@@ -3,22 +3,6 @@
 #include <string.h>
 #include "tpre.h"
 
-int match_equal(tpre_match_t const* a, tpre_match_t const* b)
-{
-  if (a->found != b->found)
-    return 0;
-  if (a->ngroups != b->ngroups)
-    return 0;
-  for (size_t i = 0; i < a->ngroups; i++)
-  {
-    if (a->groups[i].begin != b->groups[i].begin)
-      return 0;
-    if (a->groups[i].len != b->groups[i].len)
-      return 0;
-  }
-  return 1;
-}
-
 tpre_match_t
 match(char const* pat, char const* str, tpre_opts_t opts)
 {
@@ -31,11 +15,7 @@ match(char const* pat, char const* str, tpre_opts_t opts)
   tpre_errs_t errs;
   if (tpre_compile(&re, pat, &errs, opts))
     assert(false && "compile fail");
-  tpre_match_t a = tpre_match(&re, str);
-  tpre_match_t b = tpre_matchn(&re, buf, strl);
-  if (!match_equal(&a, &b))
-    assert(false && "matchn() not same result as match()");
-  return a;
+  return tpre_matchn(&re, buf, strl);
 }
 
 int main()
@@ -59,15 +39,48 @@ int main()
   assert(!m.found);
   m = match("abc", "abc", (tpre_opts_t) { 0 });
   assert(m.found);
-  m = match(
-      "abc", "abc  ", (tpre_opts_t) { .end_unanchored = 1 });
+  m = match("abc", "abc  ", (tpre_opts_t) { .end_unanchored = 1 });
   assert(m.found);
   m = match("abc", "  abc", (tpre_opts_t) { 0 });
   assert(!m.found);
   m = match(
-      "(abc)", "  abc", (tpre_opts_t) { .start_unanchored = 1, 0 });
+      "(abc)", "  abc",
+      (tpre_opts_t) { .start_unanchored = 1, 0 });
   assert(m.found);
   assert(m.ngroups == 2);
   assert(m.groups[1].begin == 2);
   assert(m.groups[1].len == 3);
+
+  // lazy don't match anything at end, unless anchored
+  m = match(
+      "(a*?)", "aaaaaa", (tpre_opts_t) { .end_unanchored = 1 });
+  assert(m.found);
+  assert(m.ngroups == 2);
+  assert(m.groups[1].len == 0);
+  m = match(
+      "(a+?)", "aaaaaa", (tpre_opts_t) { .end_unanchored = 1 });
+  assert(m.found);
+  assert(m.ngroups == 2);
+  assert(m.groups[1].begin == 0);
+  assert(m.groups[1].len == 1);
+  m = match("(a*?)", "aaaaaa", (tpre_opts_t) { 0 });
+  assert(m.found);
+  assert(m.ngroups == 2);
+  assert(m.groups[1].begin == 0);
+  assert(m.groups[1].len == 6);
+
+  // backtracking matches
+  m = match("(\\d*?)(\\d+)", "123456", (tpre_opts_t) { 0 });
+  assert(m.found);
+  assert(m.ngroups == 3);
+  assert(m.groups[1].len == 0);
+  assert(m.groups[2].begin == 0);
+  assert(m.groups[2].len = 6);
+  m = match("(\\d*)(\\d+)", "123456", (tpre_opts_t) { 0 });
+  assert(m.found);
+  assert(m.ngroups == 3);
+  assert(m.groups[1].begin == 0);
+  assert(m.groups[1].len == 5);
+  assert(m.groups[2].begin == 5);
+  assert(m.groups[2].len = 1);
 }

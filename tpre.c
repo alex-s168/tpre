@@ -9,6 +9,29 @@
 #include <string.h>
 
 
+#ifdef __GNUC__
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wunused-function"
+#endif
+
+#define SLOWARR_FUNC static
+#include "slowarr.h"
+
+
+typedef struct
+{
+  tpre_nodeid_t cursor;
+  tpre_match_t match;
+  size_t i;
+} bt_stack_ent;
+
+SLOWARR_Header(bt_stack_ent);
+SLOWARR_Impl(bt_stack_ent);
+
+#ifdef __GNUC__
+# pragma GCC diagnostic pop
+#endif
+
 #define NODE_DONE ((tpre_nodeid_t) - 2)
 #define NODE_ERR ((tpre_nodeid_t) - 1)
 
@@ -18,6 +41,7 @@
 #define SPECIAL_START (3)
 #define SPECIAL_DIGIT (4)
 #define SPECIAL_WORDC (5)
+#define SPECIAL_BT_PUSH (6)
 #define NO(c)         \
   ((tpre_pattern_t) { \
     .is_special = 0, .val = (uint8_t) c, .invert = 0 })
@@ -97,6 +121,17 @@ void tpre_match_free(tpre_match_t match)
   free(match.groups);
 }
 
+static tpre_match_t tpre_match_dup(tpre_match_t const* match)
+{
+  tpre_match_t out;
+  out.found = match->found;
+  out.ngroups = match->ngroups;
+  out.groups = malloc(sizeof(*out.groups) * out.ngroups);
+  for (size_t i = 0; i < match->ngroups; i++)
+    out.groups[i] = match->groups[i];
+  return out;
+}
+
 static void tpre_match_group_put(
     tpre_match_t* match,
     tpre_groupid_t group,
@@ -137,6 +172,8 @@ pattern_match(tpre_pattern_t pat, char src, bool is_begin)
           ? 1
           : -1;
 
+    case SPECIAL_BT_PUSH: return -2;
+
     case SPECIAL_END: return src == '\0' ? 0 : -1;
 
     case SPECIAL_START: return is_begin ? 0 : -1;
@@ -154,88 +191,75 @@ static tpre_match_t init_match(tpre_re_t const* re)
   return match;
 }
 
-tpre_match_t tpre_match(tpre_re_t const* re, const char* str)
-{
-  tpre_match_t match = init_match(re);
-
-  const char* begin_str = str;
-  int m;
-
-  tpre_nodeid_t cursor = re->first_node;
-  while (cursor >= 0)
-  {
-    m = pattern_match(re->i[cursor].pat, *str, begin_str == str);
-    if (m >= 0)
-    {
-      for (; m && *str; m--, str++)
-        tpre_match_group_put(
-            &match, re->i[cursor].group, *str, str - begin_str);
-      cursor = re->i[cursor].ok;
-    }
-    else
-    {
-      tpre_backtrack_t bt = re->i[cursor].backtrack;
-      str -= bt;
-      tpre_groupid_t g = re->i[cursor].group;
-      if (bt > 0)
-      {
-        if (match.groups[g].len >= bt)
-        {
-          size_t n = bt;
-          if (n > match.groups[g].len)
-            n = match.groups[g].len;
-          match.groups[g].len -= n;
-        }
-      }
-      cursor = re->i[cursor].err;
-    }
-  }
-
-  match.found = cursor == NODE_DONE;
-
-  return match;
-}
-
 tpre_match_t
 tpre_matchn(tpre_re_t const* re, const char* str, size_t strl)
 {
+  SLOWARR_MANGLE(bt_stack_ent) bt_stack = { 0 };
+
   tpre_match_t match = init_match(re);
-
   size_t i = 0;
-  int m;
-
   tpre_nodeid_t cursor = re->first_node;
-  while (cursor >= 0)
-  {
-    m = pattern_match(
-        re->i[cursor].pat, i == strl ? '\0' : str[i], i == 0);
-    if (m >= 0)
-    {
-      for (; m && i < strl; m--, i++)
-        tpre_match_group_put(
-            &match, re->i[cursor].group, str[i], i);
-      cursor = re->i[cursor].ok;
-    }
-    else
-    {
-      tpre_backtrack_t bt = re->i[cursor].backtrack;
-      i -= bt;
-      tpre_groupid_t g = re->i[cursor].group;
-      if (bt > 0)
-      {
-        if (match.groups[g].len >= bt)
-        {
-          size_t n = bt;
-          if (n > match.groups[g].len)
-            n = match.groups[g].len;
-          match.groups[g].len -= n;
-        }
-      }
-      cursor = re->i[cursor].err;
-    }
-  }
 
-  match.found = cursor == NODE_DONE;
+  do
+  {
+    while (cursor >= 0)
+    {
+      int m = pattern_match(
+          re->i[cursor].pat, i == strl ? '\0' : str[i], i == 0);
+      if (m == -2)
+      {
+        // TODO: can do this more efficiently: can reuse memory from dups
+        SLOWARR_MANGLE_F(bt_stack_ent, push)(
+            &bt_stack,
+            (bt_stack_ent) {
+              .cursor = re->i[cursor].err,
+              .i = i,
+              .match = tpre_match_dup(&match) });
+        m = 0;
+      }
+      if (m >= 0)
+      {
+        for (; m && i < strl; m--, i++)
+          tpre_match_group_put(
+              &match, re->i[cursor].group, str[i], i);
+        cursor = re->i[cursor].ok;
+      }
+      else
+      {
+        tpre_backtrack_t bt = re->i[cursor].backtrack;
+        i -= bt;
+        tpre_groupid_t g = re->i[cursor].group;
+        if (bt > 0)
+        {
+          if (match.groups[g].len >= bt)
+          {
+            size_t n = bt;
+            if (n > match.groups[g].len)
+              n = match.groups[g].len;
+            match.groups[g].len -= n;
+          }
+        }
+        cursor = re->i[cursor].err;
+      }
+    }
+
+    if (cursor == NODE_DONE)
+    {
+      match.found = true;
+      break;
+    }
+
+    if (!bt_stack.len)
+      return match;
+
+    tpre_match_free(match);
+
+    bt_stack_ent e =
+        SLOWARR_MANGLE_F(bt_stack_ent, pop)(&bt_stack);
+    cursor = e.cursor;
+    i = e.i;
+    match = e.match;
+  } while (1);
 
   return match;
 }
@@ -285,10 +309,10 @@ typedef enum
 {
   Match,
   MatchRange,
-  RepeatLazyLeast0,
-  RepeatLeast0,
-  RepeatLazyLeast1,
-  RepeatLeast1,
+  LazyRepeatLeast0,
+  LazyRepeatLeast1,
+  GreedyRepeatLeast0,
+  GreedyRepeatLeast1,
   OrNot,
   CaptureGroupOpen,
   CaptureGroupOpenNoCapture,
@@ -305,10 +329,10 @@ typedef enum
 static const char* ReTkTy_str[] = {
   [Match] = "Match",
   [MatchRange] = "MatchRange",
-  [RepeatLazyLeast0] = "RepeatLazyLeast0",
-  [RepeatLeast0] = "RepeatLeast0",
-  [RepeatLazyLeast1] = "RepeatLazyLeast1",
-  [RepeatLeast1] = "RepeatLeast1",
+  [LazyRepeatLeast0] = "LazyRepeatLeast0",
+  [GreedyRepeatLeast0] = "GreedyRepeatLeast0",
+  [LazyRepeatLeast1] = "LazyRepeatLeast1",
+  [GreedyRepeatLeast1] = "GreedyRepeatLeast1",
   [OrNot] = "OrNot",
   [CaptureGroupOpen] = "CaptureGroupOpen",
   [CaptureGroupOpenNoCapture] = "CaptureGroupOpenNoCapture",
@@ -351,8 +375,9 @@ static bool isOneOfOpen(ReTkTy ty)
 
 static bool isPostfix(ReTkTy ty)
 {
-  return ty == OrNot || ty == RepeatLeast0 || ty == RepeatLeast1 ||
-      ty == RepeatLazyLeast0 || ty == RepeatLazyLeast1;
+  return ty == OrNot || ty == GreedyRepeatLeast0 ||
+      ty == GreedyRepeatLeast1 || ty == LazyRepeatLeast0 ||
+      ty == LazyRepeatLeast1;
 }
 
 static void ReTk_dump(ReTk tk, FILE* out)
@@ -514,11 +539,11 @@ static bool lex(ReTk* tkOut, bool isOneOf, char const** reader)
     if (**reader == '?')
     {
       (*reader)++;
-      tkOut->ty = RepeatLazyLeast0;
+      tkOut->ty = LazyRepeatLeast0;
     }
     else
     {
-      tkOut->ty = RepeatLeast0;
+      tkOut->ty = GreedyRepeatLeast0;
     }
     return true;
   }
@@ -529,11 +554,11 @@ static bool lex(ReTk* tkOut, bool isOneOf, char const** reader)
     if (**reader == '?')
     {
       (*reader)++;
-      tkOut->ty = RepeatLazyLeast1;
+      tkOut->ty = LazyRepeatLeast1;
     }
     else
     {
-      tkOut->ty = RepeatLeast1;
+      tkOut->ty = GreedyRepeatLeast1;
     }
     return true;
   }
@@ -765,8 +790,8 @@ typedef enum
   NodeOr,
   NodeMaybe,
   NodeNot,
-  NodeRepeatLeast0,
-  NodeRepeatLeast1,
+  NodeGreedyRepeatLeast0,
+  NodeGreedyRepeatLeast1,
   NodeLazyRepeatLeast0,
   NodeLazyRepeatLeast1,
   NodeJustGroup,
@@ -782,8 +807,8 @@ static const char* NodeKind_str[] = {
   [NodeOr] = "Or",
   [NodeMaybe] = "Maybe",
   [NodeNot] = "Not",
-  [NodeRepeatLeast0] = "RepeatLeast0",
-  [NodeRepeatLeast1] = "RepeatLeast1",
+  [NodeGreedyRepeatLeast0] = "GreedyRepeatLeast0",
+  [NodeGreedyRepeatLeast1] = "GreedyRepeatLeast1",
   [NodeLazyRepeatLeast0] = "LazyRepeatLeast0",
   [NodeLazyRepeatLeast1] = "LazyRepeatLeast1",
   [NodeJustGroup] = "JustGroup",
@@ -866,8 +891,8 @@ static void Node_children(Node* nd, Node* childrenOut[2])
 
     case NodeMaybe: childrenOut[0] = nd->maybe; break;
 
-    case NodeRepeatLeast0:
-    case NodeRepeatLeast1:
+    case NodeGreedyRepeatLeast0:
+    case NodeGreedyRepeatLeast1:
     case NodeLazyRepeatLeast0:
     case NodeLazyRepeatLeast1:
       childrenOut[0] = nd->repeat;
@@ -919,8 +944,8 @@ static Node* Node_clone(Node* node)
 
     case NodeNot: copy->not= Node_clone(node->not); break;
 
-    case NodeRepeatLeast0:
-    case NodeRepeatLeast1:
+    case NodeGreedyRepeatLeast0:
+    case NodeGreedyRepeatLeast1:
     case NodeLazyRepeatLeast0:
     case NodeLazyRepeatLeast1:
       copy->repeat = Node_clone(node->repeat);
@@ -1023,8 +1048,8 @@ static bool Node_eq(Node* a, Node* b)
 
     case NodeNot: return Node_eq(a->not, b->not);
 
-    case NodeRepeatLeast0:
-    case NodeRepeatLeast1:
+    case NodeGreedyRepeatLeast0:
+    case NodeGreedyRepeatLeast1:
     case NodeLazyRepeatLeast0:
     case NodeLazyRepeatLeast1:
       return Node_eq(a->repeat, b->repeat);
@@ -1120,22 +1145,22 @@ static void handle_postfix(Node* node, ReTk op)
     node->kind = NodeMaybe;
     node->maybe = copy;
   }
-  else if (op.ty == RepeatLeast0)
+  else if (op.ty == GreedyRepeatLeast0)
   {
-    node->kind = NodeRepeatLeast0;
+    node->kind = NodeGreedyRepeatLeast0;
     node->repeat = copy;
   }
-  else if (op.ty == RepeatLeast1)
+  else if (op.ty == GreedyRepeatLeast1)
   {
-    node->kind = NodeRepeatLeast1;
+    node->kind = NodeGreedyRepeatLeast1;
     node->repeat = copy;
   }
-  else if (op.ty == RepeatLazyLeast0)
+  else if (op.ty == LazyRepeatLeast0)
   {
     node->kind = NodeLazyRepeatLeast0;
     node->repeat = copy;
   }
-  else if (op.ty == RepeatLazyLeast1)
+  else if (op.ty == LazyRepeatLeast1)
   {
     node->kind = NodeLazyRepeatLeast1;
     node->repeat = copy;
@@ -1448,8 +1473,8 @@ static Node* find_trough_rep(Node* node, NodeKind what)
   {
     case NodeLazyRepeatLeast0:
     case NodeLazyRepeatLeast1:
-    case NodeRepeatLeast0:
-    case NodeRepeatLeast1:
+    case NodeGreedyRepeatLeast0:
+    case NodeGreedyRepeatLeast1:
       return find_trough_rep(node->repeat, what);
 
     default: return NULL;
@@ -1476,14 +1501,6 @@ static int verify(Node* nd, tpre_errs_t* errs)
   verify(children[0], errs);
   verify(children[1], errs);
 
-  if (nd->kind == NodeRepeatLeast0 ||
-      nd->kind == NodeRepeatLeast1)
-  {
-    tpre_add_err(
-        errs, nd->wherePlus1 - 1,
-        "only lazy repeats are supported");
-    return 1;
-  }
   return 0;
 }
 
@@ -1583,7 +1600,7 @@ static void groups(
   groups(children[1], group, global_next_group_id, next_named_gr);
 }
 
-/** convert RepeatLazyLeast1 to RepeatLazyLeast0 */
+/** convert RepeatLeast1 to RepeatLeast0 */
 static void fix_0(Node* node)
 {
   if (node == NULL)
@@ -1600,6 +1617,19 @@ static void fix_0(Node* node)
     Node* rep = Node_alloc();
     rep->group = node->group;
     rep->kind = NodeLazyRepeatLeast0;
+    rep->wherePlus1 = node->wherePlus1;
+    rep->repeat = node->repeat;
+    node->kind = NodeChain;
+    node->chain.a = first;
+    node->chain.b = rep;
+  }
+
+  if (node->kind == NodeGreedyRepeatLeast1)
+  {
+    Node* first = Node_clone(node->repeat);
+    Node* rep = Node_alloc();
+    rep->group = node->group;
+    rep->kind = NodeGreedyRepeatLeast0;
     rep->wherePlus1 = node->wherePlus1;
     rep->repeat = node->repeat;
     node->kind = NodeChain;
@@ -1694,9 +1724,13 @@ static void lower(
   assert(node);
   switch (node->kind)
   {
+    // removed/checked by fix_*() and verify()
     case NodeLazyRepeatLeast1:
-    case NodeRepeatLeast0:
-    case NodeRepeatLeast1:     __builtin_unreachable(); break;
+    case NodeGreedyRepeatLeast1:
+#ifdef __GNUC__
+      __builtin_unreachable();
+#endif
+      break;
 
     case NodeMatch: {
       if (num_match)
@@ -1708,8 +1742,41 @@ static void lower(
     }
     break;
 
+    // parse everything, and backtrack until next pattern matches
+    case NodeGreedyRepeatLeast0: {
+      // this: bt_push(then: loop, onbt: on_error)
+      // loop: bt_push(then: step, onbt: next/on_ok)
+      // step: node(ok: loop, err: next/on_ok)
+      tpre_nodeid_t step = tpre_re_resvnode(out);
+      tpre_nodeid_t loop = tpre_re_addnode(
+          out,
+          (tpre_re_node_t) {
+            SP(SPECIAL_BT_PUSH),
+            /* then: */ step,
+            /* onbt: */ on_ok, 0, 0 });
+      lower(
+          out, step, /*on_ok=*/loop, /*on_error=*/on_ok, 0, NULL,
+          node->repeat);
+      tpre_re_setnode(
+          out, this_id,
+          (tpre_re_node_t) {
+            SP(SPECIAL_BT_PUSH),
+            /* then: */ loop,
+            /* onbt: */ on_error, 0, 0 });
+    }
+    break;
+
+    // parse until next pattern matches
     case NodeLazyRepeatLeast0: {
-      lower(out, this_id, this_id, on_ok, 0, NULL, node->repeat);
+      tpre_nodeid_t step = tpre_re_resvnode(out);
+      lower(
+          out, step, /*on_ok=*/this_id, /*on_error=*/on_error,
+          /*bt=*/0, NULL, node->repeat);
+      tpre_re_setnode(
+          out, this_id,
+          (tpre_re_node_t) {
+            SP(SPECIAL_BT_PUSH), /* then: */ on_ok,
+            /* onbt: */ step, 0, 0 });
     }
     break;
 
@@ -1754,8 +1821,8 @@ static Node* leftmost(Node* node)
   {
     case NodeLazyRepeatLeast0:
     case NodeLazyRepeatLeast1:
-    case NodeRepeatLeast0:
-    case NodeRepeatLeast1:     return leftmost(node->repeat);
+    case NodeGreedyRepeatLeast0:
+    case NodeGreedyRepeatLeast1: return leftmost(node->repeat);
 
     case NodeChain: return leftmost(node->chain.a);
 
@@ -1820,11 +1887,12 @@ static void tpre_dump(tpre_re_t out)
       s[0] = '\\';
       switch (out.i[i].pat.val)
       {
-        case SPECIAL_ANY:   s[1] = '*'; break;
-        case SPECIAL_END:   s[1] = '$'; break;
-        case SPECIAL_SPACE: s[1] = 's'; break;
-        case SPECIAL_START: s[1] = '^'; break;
-        default:            break;
+        case SPECIAL_ANY:     s[1] = '*'; break;
+        case SPECIAL_END:     s[1] = '$'; break;
+        case SPECIAL_SPACE:   s[1] = 's'; break;
+        case SPECIAL_START:   s[1] = '^'; break;
+        case SPECIAL_BT_PUSH: s[1] = '{'; break;
+        default:              break;
       }
       s[2] = '\0';
     }
