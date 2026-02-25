@@ -302,6 +302,23 @@ typedef struct
   };
 } ReTk;
 
+static bool isCaptureGroupOpen(ReTkTy ty)
+{
+  return ty == CaptureGroupOpen || ty == CaptureGroupOpenNamed ||
+      ty == CaptureGroupOpenNoCapture;
+}
+
+static bool isOneOfOpen(ReTkTy ty)
+{
+  return ty == OneOfOpen || ty == OneOfOpenInvert;
+}
+
+static bool isPostfix(ReTkTy ty)
+{
+  return ty == OrNot || ty == RepeatLeast0 || ty == RepeatLeast1 ||
+      ty == RepeatLazyLeast0 || ty == RepeatLazyLeast1;
+}
+
 static void ReTk_dump(ReTk tk, FILE* out)
 {
   fprintf(out, "%s", ReTkTy_str[tk.ty]);
@@ -331,13 +348,13 @@ static void ReTk_dump(ReTk tk, FILE* out)
   }
 }
 
-// "UNDOCUMENTED" SYNTAX:
+// TODO "UNDOCUMENTED" SYNTAX:
 //
 //  backref to group 39:   \39
 //  backref to group 39:   \g{39}
 //  backref to group hey:  \g{hey}
 
-static bool lex(ReTk* tkOut, char const** reader)
+static bool lex(ReTk* tkOut, bool isOneOf, char const** reader)
 {
   if (!**reader)
     return false;
@@ -352,7 +369,7 @@ static bool lex(ReTk* tkOut, char const** reader)
     return true;
   }
 
-  if (**reader == '.')
+  if (!isOneOf && **reader == '.')
   {
     (*reader)++;
     tkOut->ty = Match;
@@ -367,13 +384,24 @@ static bool lex(ReTk* tkOut, char const** reader)
 
     if (isdigit(c))
     {
-      // backreference
       long num = strtol(*reader, (char**) reader, 10);
-      tkOut->ty = BackrefId;
-      tkOut->group_id = (tpre_groupid_t) num;
-      return true;
+      if (isOneOf)
+      {
+        // TODO: document this syntax: matches char with this ascii code
+        tkOut->ty = Match;
+        tkOut->match = (tpre_pattern_t) {
+          .invert = 0, .is_special = 0, .val = (char) num
+        };
+      }
+      else
+      {
+        // backreference
+        tkOut->ty = BackrefId;
+        tkOut->group_id = (tpre_groupid_t) num;
+        return true;
+      }
     }
-    else if (c == 'g')
+    else if (!isOneOf && c == 'g')
     {
       (*reader)++;
       // also backreference
@@ -444,7 +472,7 @@ static bool lex(ReTk* tkOut, char const** reader)
     }
   }
 
-  if (**reader == '*')
+  if (!isOneOf && **reader == '*')
   {
     (*reader)++;
     if (**reader == '?')
@@ -459,7 +487,7 @@ static bool lex(ReTk* tkOut, char const** reader)
     return true;
   }
 
-  if (**reader == '+')
+  if (!isOneOf && **reader == '+')
   {
     (*reader)++;
     if (**reader == '?')
@@ -474,14 +502,14 @@ static bool lex(ReTk* tkOut, char const** reader)
     return true;
   }
 
-  if (**reader == '?')
+  if (!isOneOf && **reader == '?')
   {
     (*reader)++;
     tkOut->ty = OrNot;
     return true;
   }
 
-  if (**reader == '(')
+  if (!isOneOf && **reader == '(')
   {
     (*reader)++;
     if (**reader == '?')
@@ -528,14 +556,14 @@ static bool lex(ReTk* tkOut, char const** reader)
     }
   }
 
-  if (**reader == ')')
+  if (!isOneOf && **reader == ')')
   {
     (*reader)++;
     tkOut->ty = CaptureGroupClose;
     return true;
   }
 
-  if (**reader == '[')
+  if (!isOneOf && **reader == '[')
   {
     (*reader)++;
     if (**reader == '^')
@@ -548,6 +576,11 @@ static bool lex(ReTk* tkOut, char const** reader)
     return true;
   }
 
+  if (isOneOf && **reader == '[')
+  {
+    // TODO: parse posix character classes
+  }
+
   if (**reader == ']')
   {
     (*reader)++;
@@ -555,14 +588,14 @@ static bool lex(ReTk* tkOut, char const** reader)
     return true;
   }
 
-  if (**reader == '|')
+  if (!isOneOf && **reader == '|')
   {
     (*reader)++;
     tkOut->ty = OrElse;
     return true;
   }
 
-  if (**reader == '^')
+  if (!isOneOf && **reader == '^')
   {
     (*reader)++;
     tkOut->ty = Match;
@@ -570,7 +603,7 @@ static bool lex(ReTk* tkOut, char const** reader)
     return true;
   }
 
-  if (**reader == '$')
+  if (!isOneOf && **reader == '$')
   {
     (*reader)++;
     tkOut->ty = Match;
@@ -664,11 +697,19 @@ static TkL lexe(const char* src)
 
   ReTk tok;
   const char* reader = src;
-  while (lex(&tok, &reader))
+  bool isOneOf = false;
+  while (lex(&tok, isOneOf, &reader))
+  {
     TkL_add(&out, tok);
+    if (isOneOfOpen(tok.ty))
+      isOneOf = true;
+    else if (tok.ty == OneOfClose)
+      isOneOf = false;
+  }
 
   if (*reader)
   {
+    // TODO: yield errors differently
     fprintf(stderr, "error at arround %zu\n", reader - src);
     free(out.tokens);
     exit(1);
@@ -961,23 +1002,6 @@ static bool Node_eq(Node* a, Node* b)
 
     case NodeBackref: return a->backref == b->backref;
   }
-}
-
-static bool isCaptureGroupOpen(ReTkTy ty)
-{
-  return ty == CaptureGroupOpen || ty == CaptureGroupOpenNamed ||
-      ty == CaptureGroupOpenNoCapture;
-}
-
-static bool isOneOfOpen(ReTkTy ty)
-{
-  return ty == OneOfOpen || ty == OneOfOpenInvert;
-}
-
-static bool isPostfix(ReTkTy ty)
-{
-  return ty == OrNot || ty == RepeatLeast0 || ty == RepeatLeast1 ||
-      ty == RepeatLazyLeast0 || ty == RepeatLazyLeast1;
 }
 
 static Node* maybeChain(Node* a, Node* b)

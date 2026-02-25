@@ -1,5 +1,5 @@
 #include <string.h>
-#include "include/tpre.h"
+#include "tpre.h"
 
 static int test(
     const char* pats,

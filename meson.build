@@ -13,8 +13,12 @@ dep_tpre = declare_dependency(
   link_with: libtpre,
   include_directories: './include')
 
-test('test-tpre', executable('test-tpre',
-  'test.c',
+test('test-cartrain', executable('test-cartrain',
+  './tests/cartrain.c',
+  dependencies: dep_tpre))
+
+test('test-char-classes', executable('test-char-classes',
+  './tests/char_classes.c',
   dependencies: dep_tpre))
 
 test('example', executable('example',
