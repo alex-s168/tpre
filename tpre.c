@@ -112,12 +112,6 @@ static tpre_match_t init_match(tpre_re_t const* re)
   match.ngroups = re->max_group + 1;
   match.groups = calloc(sizeof(*match.groups), match.ngroups);
 
-  for (size_t i = 0; i < re->num_named_groups; i++)
-  {
-    match.groups[re->first_named_group + i].opt_name =
-        re->named_groups[i];
-  }
-
   return match;
 }
 
@@ -212,7 +206,10 @@ tpre_matchn(tpre_re_t const* re, const char* str, size_t strl)
 }
 
 void tpre_match_dump(
-    tpre_match_t match, char const* matched_str, FILE* out)
+    tpre_re_t const* re,
+    tpre_match_t match,
+    char const* matched_str,
+    FILE* out)
 {
   if (match.found)
   {
@@ -221,9 +218,12 @@ void tpre_match_dump(
     for (i = 1; i < match.ngroups; i++)
     {
       tpre_group_t group = match.groups[i];
+      char const* name = i >= re->first_named_group
+          ? (re->named_groups[i - re->first_named_group])
+          : 0;
 
-      if (group.opt_name)
-        fprintf(out, "  group '%s': ", group.opt_name);
+      if (name)
+        fprintf(out, "  group '%s': ", name);
       else
         fprintf(out, "  group %zu: ", i);
       fwrite(matched_str + group.begin, 1, group.len, out);
@@ -236,19 +236,14 @@ void tpre_match_dump(
   }
 }
 
-tpre_group_t const*
-tpre_match_find_group(tpre_match_t match, char const* name)
+/** negative on failure */
+int tpre_find_group(tpre_re_t const* re, char const* name)
 {
-  for (size_t i = 0; i < match.ngroups; i++)
-  {
-    if (match.groups[i].opt_name &&
-        !strcmp(match.groups[i].opt_name, name))
-    {
-      return &match.groups[i];
-    }
-  }
+  for (tpre_groupid_t i = 0; i < re->num_named_groups; i++)
+    if (!strcmp(re->named_groups[i], name))
+      return (int) (re->num_named_groups + i);
 
-  return NULL;
+  return -1;
 }
 
 typedef enum

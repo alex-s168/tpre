@@ -16,3 +16,7 @@ dep_tpre = declare_dependency(
 test('test-tpre', executable('test-tpre',
   'test.c',
   dependencies: dep_tpre))
+
+test('example', executable('example',
+  'example.c',
+  dependencies: dep_tpre))
