@@ -71,7 +71,7 @@ example: `(?# this is ignored)`
 ### one of
 matches any of the inner patterns.
 
-example: `[12(?:hi)3]` matches either `1`, `2`, `hi`, or `3`
+example: `[12(h|i)3]` matches either `1`, `2`, `(`, `h`, `|`, `i`, `)`, or `3`
 
 ### or
 matches either the left pattern or the right pattern
