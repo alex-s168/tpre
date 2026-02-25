@@ -67,11 +67,14 @@ typedef struct
  * depends on lifetime of [tpre_re_t]
  *
  * all named capture groups get their IDs appended to the unnamed capture groups 
+ *
+ * group 0 currently is always empty, but will contain whole matched string in the future
  */
 typedef struct
 {
   bool found;
 
+  // including group 0
   size_t ngroups;
   tpre_group_t* groups;
 } tpre_match_t;
@@ -94,9 +97,25 @@ void tpre_match_free(tpre_match_t match);
 /** negative on failure */
 int tpre_find_group(tpre_re_t const* re, char const* name);
 
+// zero initialized is default
+typedef struct
+{
+  // if true, `^` can be used to anchor at start
+  bool start_unanchored;
+  // if true, `$` can be used to anchor at end
+  bool end_unanchored;
+
+  // TODO:
+  // bool startend_is_line;
+  // bool ignore_case;
+} tpre_opts_t;
+
 /** 0 = ok; errsOut can be null */
 int tpre_compile(
-    tpre_re_t* out, char const* str, tpre_errs_t* errs_out);
+    tpre_re_t* out,
+    char const* str,
+    tpre_errs_t* errs_out,
+    tpre_opts_t opts);
 void tpre_free(tpre_re_t re);
 
 void tpre_errs_free(tpre_errs_t errs);

@@ -19,7 +19,8 @@ int match_equal(tpre_match_t const* a, tpre_match_t const* b)
   return 1;
 }
 
-tpre_match_t match(char const* pat, char const* str)
+tpre_match_t
+match(char const* pat, char const* str, tpre_opts_t opts)
 {
   size_t strl = strlen(str);
   char* buf = malloc(strl + 200);
@@ -28,7 +29,7 @@ tpre_match_t match(char const* pat, char const* str)
 
   tpre_re_t re;
   tpre_errs_t errs;
-  if (tpre_compile(&re, pat, &errs))
+  if (tpre_compile(&re, pat, &errs, opts))
     assert(false && "compile fail");
   tpre_match_t a = tpre_match(&re, str);
   tpre_match_t b = tpre_matchn(&re, buf, strl);
@@ -40,14 +41,33 @@ tpre_match_t match(char const* pat, char const* str)
 int main()
 {
   tpre_match_t m;
-  m = match("[ab(cd)e*+]", "(");
+  m = match("[ab(cd)e*+]", "a", (tpre_opts_t) { 0 });
   assert(m.found);
-  m = match("[ab(cd)e*+]", ")");
+  m = match("[ab(cd)e*+]", "(", (tpre_opts_t) { 0 });
   assert(m.found);
-  m = match("[ab(cd)e*+]", "+");
+  m = match("[ab(cd)e*+]", ")", (tpre_opts_t) { 0 });
   assert(m.found);
-  m = match("[ab(cd)e*+]", "*");
+  m = match("[ab(cd)e*+]", "+", (tpre_opts_t) { 0 });
   assert(m.found);
-  m = match("[ab(cd)e*+]", "!");
+  m = match("[ab(cd)e*+]", "*", (tpre_opts_t) { 0 });
+  assert(m.found);
+  m = match("[ab(cd)e*+]", "!", (tpre_opts_t) { 0 });
   assert(!m.found);
+
+  // anchored
+  m = match("abc", "abc  ", (tpre_opts_t) { 0 });
+  assert(!m.found);
+  m = match("abc", "abc", (tpre_opts_t) { 0 });
+  assert(m.found);
+  m = match(
+      "abc", "abc  ", (tpre_opts_t) { .end_unanchored = 1 });
+  assert(m.found);
+  m = match("abc", "  abc", (tpre_opts_t) { 0 });
+  assert(!m.found);
+  m = match(
+      "(abc)", "  abc", (tpre_opts_t) { .start_unanchored = 1, 0 });
+  assert(m.found);
+  assert(m.ngroups == 2);
+  assert(m.groups[1].begin == 2);
+  assert(m.groups[1].len == 3);
 }

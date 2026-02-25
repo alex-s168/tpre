@@ -10,7 +10,7 @@ static int test(
 {
   tpre_re_t pat;
   tpre_errs_t errs;
-  if (tpre_compile(&pat, pats, &errs))
+  if (tpre_compile(&pat, pats, &errs, (tpre_opts_t) { 0 }))
     return 1;
 
   // no nullterm

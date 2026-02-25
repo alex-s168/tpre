@@ -4,7 +4,7 @@
 static void compile(tpre_re_t* out, char const* str)
 {
   tpre_errs_t errs;
-  if (tpre_compile(out, str, &errs) != 0)
+  if (tpre_compile(out, str, &errs, (tpre_opts_t) { 0 }) != 0)
   {
     fprintf(stderr, "regex compile failed:\n");
     size_t i;

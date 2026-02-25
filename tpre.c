@@ -111,32 +111,37 @@ static void tpre_match_group_put(
   g->len++;
 }
 
-static bool
+static int
 pattern_match(tpre_pattern_t pat, char src, bool is_begin)
 {
   if (!pat.is_special)
-    return src == (char) pat.val;
+    return src == (char) pat.val ? 1 : -1;
 
   switch (pat.val)
   {
-    case SPECIAL_ANY: return src != '\n';
+    case SPECIAL_ANY: return src != '\n' ? 1 : -1;
 
     case SPECIAL_SPACE:
-      return src == ' ' || src == '\n' || src == '\t' ||
-          src == '\r';
+      return (src == ' ' || src == '\n' || src == '\t' ||
+              src == '\r')
+          ? 1
+          : -1;
 
-    case SPECIAL_DIGIT: return src >= '0' && src <= '9';
+    case SPECIAL_DIGIT:
+      return (src >= '0' && src <= '9') ? 1 : -1;
 
     case SPECIAL_WORDC:
-      return (src >= '0' && src <= '9') ||
-          (src >= 'a' && src <= 'z') ||
-          (src >= 'A' && src <= 'Z') || src == '_';
+      return ((src >= '0' && src <= '9') ||
+              (src >= 'a' && src <= 'z') ||
+              (src >= 'A' && src <= 'Z') || src == '_')
+          ? 1
+          : -1;
 
-    case SPECIAL_END: return src == '\0';
+    case SPECIAL_END: return src == '\0' ? 0 : -1;
 
-    case SPECIAL_START: return is_begin;
+    case SPECIAL_START: return is_begin ? 0 : -1;
 
-    default: return false;
+    default: return -1;
   }
 }
 
@@ -154,20 +159,18 @@ tpre_match_t tpre_match(tpre_re_t const* re, const char* str)
   tpre_match_t match = init_match(re);
 
   const char* begin_str = str;
+  int m;
 
   tpre_nodeid_t cursor = re->first_node;
   while (cursor >= 0)
   {
-    if (pattern_match(re->i[cursor].pat, *str, begin_str == str))
+    m = pattern_match(re->i[cursor].pat, *str, begin_str == str);
+    if (m >= 0)
     {
-      if (*str)
-      {
+      for (; m && *str; m--, str++)
         tpre_match_group_put(
             &match, re->i[cursor].group, *str, str - begin_str);
-      }
       cursor = re->i[cursor].ok;
-      if (*str)
-        str++;
     }
     else
     {
@@ -199,21 +202,19 @@ tpre_matchn(tpre_re_t const* re, const char* str, size_t strl)
   tpre_match_t match = init_match(re);
 
   size_t i = 0;
+  int m;
 
   tpre_nodeid_t cursor = re->first_node;
   while (cursor >= 0)
   {
-    if (pattern_match(
-            re->i[cursor].pat, i == strl ? '\0' : str[i], i == 0))
+    m = pattern_match(
+        re->i[cursor].pat, i == strl ? '\0' : str[i], i == 0);
+    if (m >= 0)
     {
-      if (i < strl)
-      {
+      for (; m && i < strl; m--, i++)
         tpre_match_group_put(
             &match, re->i[cursor].group, str[i], i);
-      }
       cursor = re->i[cursor].ok;
-      if (i < strl)
-        i++;
     }
     else
     {
@@ -1808,6 +1809,7 @@ static int check_legal(tpre_errs_t* errs, Node* nd)
 
 static void tpre_dump(tpre_re_t out)
 {
+  printf("start = %i\n", out.first_node);
   printf("nd\tok\terr\tv\tbt\n");
   size_t i;
   for (i = 0; i < out.num_nodes; i++)
@@ -1819,8 +1821,9 @@ static void tpre_dump(tpre_re_t out)
       switch (out.i[i].pat.val)
       {
         case SPECIAL_ANY:   s[1] = '*'; break;
-        case SPECIAL_END:   s[1] = '0'; break;
+        case SPECIAL_END:   s[1] = '$'; break;
         case SPECIAL_SPACE: s[1] = 's'; break;
+        case SPECIAL_START: s[1] = '^'; break;
         default:            break;
       }
       s[2] = '\0';
@@ -1837,7 +1840,10 @@ static void tpre_dump(tpre_re_t out)
 }
 
 int tpre_compile(
-    tpre_re_t* out, char const* str, tpre_errs_t* errs_out)
+    tpre_re_t* out,
+    char const* str,
+    tpre_errs_t* errs_out,
+    tpre_opts_t opts)
 {
   int status = 0;
 
@@ -1895,9 +1901,58 @@ int tpre_compile(
   // Node_print(nd, stdout, 0, true);
 
   tpre_nodeid_t nd0 = tpre_re_resvnode(out);
-  lower(out, nd0, NODE_DONE, NODE_ERR, 0, NULL, nd);
+  tpre_nodeid_t err = NODE_ERR;
 
-  // tpre_dump(*out);
+  if (opts.start_unanchored)
+  {
+    out->first_node = nd0;
+    // loop until start:
+    err = tpre_re_addnode(
+        out,
+        (tpre_re_node_t) {
+          .pat = SP(SPECIAL_ANY),
+          .ok = nd0,
+          .err = NODE_ERR,
+          .backtrack = 0,
+          .group = 0,
+        });
+  }
+  else
+  {
+    tpre_nodeid_t anchor = tpre_re_addnode(
+        out,
+        (tpre_re_node_t) {
+          .pat = SP(SPECIAL_START),
+          .ok = nd0,
+          .err = NODE_ERR,
+          .backtrack = 0,
+          .group = 0,
+        });
+    out->first_node = anchor;
+  }
+
+  tpre_nodeid_t last;
+  if (opts.end_unanchored)
+  {
+    last = NODE_DONE;
+  }
+  else
+  {
+    tpre_nodeid_t anchor = tpre_re_addnode(
+        out,
+        (tpre_re_node_t) {
+          .pat = SP(SPECIAL_END),
+          .ok = NODE_DONE,
+          .err = NODE_ERR,
+          .backtrack = 0,
+          .group = 0,
+        });
+    last = anchor;
+  }
+
+  lower(out, nd0, last, err, 0, NULL, nd);
+
+  tpre_dump(*out);
 
   Node_free(nd);
 
