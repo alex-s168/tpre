@@ -1751,8 +1751,24 @@ static void lower(
       // loop: bt_push(then: step, onbt: next/on_ok)
       // step: node(ok: loop, err: next/on_ok)
       tpre_nodeid_t step = tpre_re_resvnode(out);
-      tpre_nodeid_t loop = tpre_re_addnode(
-          out,
+      tpre_nodeid_t loop;
+      if (on_error == -1)
+      {
+        loop = this_id;
+      }
+      else
+      {
+        loop = tpre_re_resvnode(out);
+        tpre_re_setnode(
+            out, this_id,
+            (tpre_re_node_t) {
+              SP(SPECIAL_BT_PUSH),
+              /* then: */ loop,
+              /* onbt: */ on_error, 0, 0 });
+      }
+
+      tpre_re_setnode(
+          out, loop,
           (tpre_re_node_t) {
             SP(SPECIAL_BT_PUSH),
             /* then: */ step,
@@ -1760,12 +1776,6 @@ static void lower(
       lower(
           out, step, /*on_ok=*/loop, /*on_error=*/on_ok, 0, NULL,
           node->repeat);
-      tpre_re_setnode(
-          out, this_id,
-          (tpre_re_node_t) {
-            SP(SPECIAL_BT_PUSH),
-            /* then: */ loop,
-            /* onbt: */ on_error, 0, 0 });
     }
     break;
 
