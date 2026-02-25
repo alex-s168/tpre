@@ -1,6 +1,7 @@
 #include "include/tpre.h"
 #include <assert.h>
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -32,6 +33,39 @@ static char* tpre_strdup(char const* s)
     return 0;
   memcpy(out, s, nb);
   return out;
+}
+
+
+void tpre_errs_free(tpre_errs_t errs)
+{
+  size_t i;
+  for (i = 0; i < errs.len; i++)
+    free(errs.items[i].message);
+  free(errs.items);
+}
+
+static void tpre_add_err(
+    tpre_errs_t* errs, size_t byte_loc, char const* fmt, ...)
+{
+  char buf[256];
+  if (!errs)
+    return;
+
+  va_list args;
+  va_start(args, fmt);
+
+  vsnprintf(buf, sizeof(buf), fmt, args);
+
+  va_end(args);
+
+  void* newptr =
+      realloc(errs->items, (errs->len + 1) * sizeof(*errs->items));
+  if (!newptr)
+    return;
+  errs->items = newptr;
+  errs->items[errs->len++] = (tpre_err_t) {
+    .pat_byte_loc = byte_loc, .message = tpre_strdup(buf)
+  };
 }
 
 static void
@@ -290,6 +324,7 @@ static const char* ReTkTy_str[] = {
 typedef struct
 {
   ReTkTy ty;
+  size_t where;
   union
   {
     tpre_pattern_t match;
@@ -619,6 +654,7 @@ static bool lex(ReTk* tkOut, bool isOneOf, char const** reader)
 
 typedef struct
 {
+  int oom;
   void* allocptr;
   ReTk* tokens;
   size_t cap;
@@ -656,7 +692,10 @@ static bool TkL_take(ReTk* out, TkL* li)
 
 static void TkL_free(TkL* li)
 {
-  free(li->allocptr);
+  if (li->allocptr && li->cap)
+    free(li->allocptr);
+  li->allocptr = 0;
+  li->cap = 0;
 }
 
 static TkL
@@ -667,7 +706,8 @@ TkL_copy_range(TkL const* li, size_t first, size_t num)
   out.cap = num;
   out.allocptr = malloc(li->cap * sizeof(ReTk));
   out.tokens = out.allocptr;
-  memcpy(out.tokens, li->tokens + first, num * sizeof(ReTk));
+  if (out.allocptr)
+    memcpy(out.tokens, li->tokens + first, num * sizeof(ReTk));
   return out;
 }
 
@@ -675,32 +715,31 @@ static void TkL_add(TkL* li, ReTk tk)
 {
   if (li->len + 1 > li->cap)
   {
-    li->cap += 16;
-    ReTk* new = malloc(li->cap * sizeof(ReTk));
+    size_t newCap = li->cap + 16;
+    ReTk* new = realloc(li->allocptr, newCap * sizeof(ReTk));
     if (!new)
     {
-      free(li->tokens);
-      fprintf(stderr, "out of memory");
-      exit(1);
+      li->oom = 1;
+      return;
     }
-    memcpy(new, li->tokens, li->len * sizeof(ReTk));
-    free(li->allocptr);
+    li->cap = newCap;
     li->allocptr = new;
     li->tokens = new;
   }
   li->tokens[li->len++] = tk;
 }
 
-static TkL lexe(const char* src)
+static int lexe(TkL* out, tpre_errs_t* errs, const char* src)
 {
-  TkL out = { 0 };
+  memset(out, 0, sizeof(TkL));
 
   ReTk tok;
   const char* reader = src;
   bool isOneOf = false;
   while (lex(&tok, isOneOf, &reader))
   {
-    TkL_add(&out, tok);
+    tok.where = reader - src;
+    TkL_add(out, tok);
     if (isOneOfOpen(tok.ty))
       isOneOf = true;
     else if (tok.ty == OneOfClose)
@@ -709,13 +748,13 @@ static TkL lexe(const char* src)
 
   if (*reader)
   {
-    // TODO: yield errors differently
-    fprintf(stderr, "error at arround %zu\n", reader - src);
-    free(out.tokens);
-    exit(1);
+    tpre_add_err(errs, reader - src, "lexer error");
+    free(out->tokens);
+    memset(out, 0, sizeof(TkL));
+    return 1;
   }
 
-  return out;
+  return 0;
 }
 
 typedef enum
@@ -758,6 +797,7 @@ struct Node
 {
   NodeKind kind;
   tpre_groupid_t group;
+  size_t wherePlus1;
   union
   {
     tpre_pattern_t match;
@@ -858,6 +898,7 @@ static Node* Node_clone(Node* node)
   Node* copy = Node_alloc();
   copy->kind = node->kind;
   copy->group = node->group;
+  copy->wherePlus1 = node->wherePlus1;
 
   switch (node->kind)
   {
@@ -1010,6 +1051,7 @@ static Node* maybeChain(Node* a, Node* b)
     return a;
 
   Node* n = Node_alloc();
+  n->wherePlus1 = a->wherePlus1;
   n->kind = NodeChain;
   n->chain.a = a;
   n->chain.b = b;
@@ -1024,17 +1066,19 @@ static Node* oneOf(Node** nodes, size_t len)
     return nodes[0];
   Node* rhs = oneOf(nodes + 1, len - 1);
   Node* self = Node_alloc();
+  self->wherePlus1 = nodes[0]->wherePlus1;
   self->kind = NodeOr;
   self->or.a = nodes[0];
   self->or.b = rhs;
   return self;
 }
 
-static Node* genMatch(tpre_pattern_t pat)
+static Node* genMatch(size_t where, tpre_pattern_t pat)
 {
   Node* self = Node_alloc();
   self->kind = NodeMatch;
   self->match = pat;
+  self->wherePlus1 = where + 1;
   return self;
 }
 
@@ -1218,6 +1262,7 @@ static Node* parse(TkL toks)
   }
 
   ReTkTy firstTy = TkL_get(&toks, 0).ty;
+  size_t firstPos = TkL_get(&toks, 0).where;
 
   if (isCaptureGroupOpen(firstTy))
   {
@@ -1241,6 +1286,7 @@ static Node* parse(TkL toks)
         &toks, close + 1, TkL_len(&toks) - close - 1));
 
     Node* self = Node_alloc();
+    self->wherePlus1 = firstPos + 1;
     if (firstTy == CaptureGroupOpen)
     {
       self->kind = NodeCaptureGroup;
@@ -1268,7 +1314,7 @@ static Node* parse(TkL toks)
   {
     Node* rem =
         parse(TkL_copy_range(&toks, 1, TkL_len(&toks) - 1));
-    Node* self = genMatch(TkL_get(&toks, 0).match);
+    Node* self = genMatch(firstPos + 1, TkL_get(&toks, 0).match);
 
     TkL_free(&toks);
     return maybeChain(self, rem);
@@ -1292,7 +1338,7 @@ static Node* parse(TkL toks)
     Node* nodes[len];
     size_t i;
     for (i = 0; i < len; i++)
-      nodes[i] = genMatch(NO(from + i));
+      nodes[i] = genMatch(firstPos, NO(from + i));
     Node* self = oneOf(nodes, len);
 
     TkL_free(&toks);
@@ -1304,6 +1350,7 @@ static Node* parse(TkL toks)
     Node* rem =
         parse(TkL_copy_range(&toks, 1, TkL_len(&toks) - 1));
     Node* self = Node_alloc();
+    self->wherePlus1 = firstPos + 1;
     self->kind = NodeBackref;
     self->backref = TkL_get(&toks, 0).group_id;
 
@@ -1316,6 +1363,7 @@ static Node* parse(TkL toks)
     Node* rem =
         parse(TkL_copy_range(&toks, 1, TkL_len(&toks) - 1));
     Node* self = Node_alloc();
+    self->wherePlus1 = firstPos + 1;
     self->kind = NodeNamedBackref;
     memcpy(
         self->named_backref.name, TkL_get(&toks, 0).group_name,
@@ -1351,6 +1399,7 @@ static Node* parse(TkL toks)
     if (firstTy == OneOfOpenInvert)
     {
       Node* new = Node_alloc();
+      new->wherePlus1 = firstPos + 1;
       new->kind = NodeNot;
       new->not= self;
       self = new;
@@ -1359,11 +1408,8 @@ static Node* parse(TkL toks)
     return maybeChain(self, rem);
   }
 
-  fprintf(
-      stderr, "unparsed tok! %s\n",
-      ReTkTy_str[TkL_get(&toks, 0).ty]);
   TkL_free(&toks);
-  exit(1);
+  return NULL;
 }
 
 typedef struct
@@ -1420,21 +1466,24 @@ static Node* last_left_chain(Node* node)
   return node;
 }
 
-static void verify(Node* nd)
+static int verify(Node* nd, tpre_errs_t* errs)
 {
   if (nd == NULL)
-    return;
+    return 1;
   Node* children[2];
   Node_children(nd, children);
-  verify(children[0]);
-  verify(children[1]);
+  verify(children[0], errs);
+  verify(children[1], errs);
 
   if (nd->kind == NodeRepeatLeast0 ||
       nd->kind == NodeRepeatLeast1)
   {
-    fprintf(stderr, "only lazy repeats supported\n");
-    exit(1);
+    tpre_add_err(
+        errs, nd->wherePlus1 - 1,
+        "only lazy repeats are supported");
+    return 1;
   }
+  return 0;
 }
 
 static size_t count_groups(Node* nd)
@@ -1550,6 +1599,7 @@ static void fix_0(Node* node)
     Node* rep = Node_alloc();
     rep->group = node->group;
     rep->kind = NodeLazyRepeatLeast0;
+    rep->wherePlus1 = node->wherePlus1;
     rep->repeat = node->repeat;
     node->kind = NodeChain;
     node->chain.a = first;
@@ -1714,7 +1764,7 @@ static Node* leftmost(Node* node)
   }
 }
 
-static void check_legal(Node* nd)
+static int check_legal(tpre_errs_t* errs, Node* nd)
 {
   if (nd->kind == NodeOr)
   {
@@ -1737,11 +1787,10 @@ static void check_legal(Node* nd)
 
         if (Node_eq(a, b))
         {
-          fprintf(
-              stderr,
-              "this pattern is not supported by tpre yet. "
-              "(check_legal() or cases)\n");
-          exit(1);
+          tpre_add_err(
+              errs,
+              nd->wherePlus1 - 1, "patterns where a case has the same starting pattern in a repeating sequence as in another case are not yet supported");
+          return 1;
         }
       }
     }
@@ -1751,10 +1800,10 @@ static void check_legal(Node* nd)
 
   Node* children[2];
   Node_children(nd, children);
-  if (children[0])
-    check_legal(children[0]);
-  if (children[1])
-    check_legal(children[1]);
+  for (int i = 0; i < 2; i++)
+    if (children[i] && check_legal(errs, children[i]))
+      return 1;
+  return 0;
 }
 
 static void tpre_dump(tpre_re_t out)
@@ -1787,10 +1836,11 @@ static void tpre_dump(tpre_re_t out)
   }
 }
 
-/** 0 = ok */
 int tpre_compile(
     tpre_re_t* out, char const* str, tpre_errs_t* errs_out)
 {
+  int status = 0;
+
   memset(out, 0, sizeof(tpre_re_t));
 
   if (errs_out)
@@ -1799,10 +1849,23 @@ int tpre_compile(
     errs_out->items = NULL;
   }
 
-  TkL li = lexe(str);
+  TkL li = { 0 };
+  if (lexe(&li, errs_out, str))
+    return 1;
+  if (li.oom)
+    return 1;
   Node* nd = parse(li);
-  verify(nd);
+  if (!nd)
+  {
+    if (li.len)
+      tpre_add_err(
+          errs_out, TkL_get(&li, 0).where, "unparsed tokens");
+    return 1;
+  }
+  if (verify(nd, errs_out))
+    status = 1;
 
+  do
   {
     size_t num_groups = count_groups(nd);
     size_t num_named_groups = count_named_groups(nd);
@@ -1811,17 +1874,23 @@ int tpre_compile(
     out->num_named_groups = num_named_groups;
     out->named_groups = malloc(sizeof(char*) * num_named_groups);
     char** named_groups_ptr = out->named_groups;
+    if (!named_groups_ptr)
+    {
+      status = 1;
+      break;
+    }
     named_groups(nd, &named_groups_ptr);
 
     tpre_groupid_t nextgr = 1;
     tpre_groupid_t next_named_gr = out->first_named_group;
     groups(nd, 0, &nextgr, &next_named_gr);
-  }
+  } while (0);
 
   fix_0(nd);
   fix_1(nd);
   fix_2(nd);
-  check_legal(nd);
+  if (check_legal(errs_out, nd))
+    status = 1;
 
   // Node_print(nd, stdout, 0, true);
 
@@ -1830,7 +1899,14 @@ int tpre_compile(
 
   // tpre_dump(*out);
 
-  return 0;
+  Node_free(nd);
+
+  if (status)
+  {
+    tpre_free(*out);
+    memset(out, 0, sizeof(tpre_re_t));
+  }
+  return status;
 }
 
 void tpre_free(tpre_re_t re)
@@ -1842,14 +1918,6 @@ void tpre_free(tpre_re_t re)
     free(re.named_groups);
     free(re.i);
   }
-}
-
-void tpre_errs_free(tpre_errs_t errs)
-{
-  size_t i;
-  for (i = 0; i < errs.len; i++)
-    free(errs.items[i].message);
-  free(errs.items);
 }
 
 // TODO: this will break the enine: a*?b|ac
