@@ -538,7 +538,7 @@ int tpre_compile(
   }
 
   TkL li = { 0 };
-  if (tprec_lexe(&li, errs_out, str))
+  if (tprec_lexe(&li, errs_out, str, &opts))
     return 1;
   if (li.oom)
     return 1;

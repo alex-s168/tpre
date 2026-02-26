@@ -78,8 +78,11 @@ void tprec_TkL_free(TkL* li);
 TkL tprec_TkL_copy_range(TkL const* li, size_t first, size_t num);
 void tprec_TkL_add(TkL* li, ReTk tk);
 
-bool tprec_lex(ReTk* tkOut, bool isOneOf, char const** reader);
-int tprec_lexe(TkL* out, tpre_errs_t* errs, const char* src);
+int tprec_lexe(
+    TkL* out,
+    tpre_errs_t* errs,
+    const char* src,
+    tpre_opts_t const* opts);
 
 #endif
 

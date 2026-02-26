@@ -8,6 +8,9 @@ libtprec = static_library('tprec',
   'compiler/lexer.c',
   'compiler/parser.c',
   'compiler/compiler.c',
+  'compiler/fsm.c',
+  'compiler/re2fsm.c',
+  'compiler/options.c',
   include_directories: './include',
   install: true)
 

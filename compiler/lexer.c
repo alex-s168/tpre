@@ -4,8 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../shared.h"
-#include "utils.h"
 #include "include/tpre_compiler.h"
+#include "utils.h"
 
 // TODO "UNDOCUMENTED" SYNTAX:
 //
@@ -13,10 +13,20 @@
 //  backref to group 39:   \g{39}
 //  backref to group hey:  \g{hey}
 
-bool tprec_lex(ReTk* tkOut, bool isOneOf, char const** reader)
+static bool
+lex(ReTk* tkOut,
+    bool isOneOf,
+    char const** reader,
+    tpre_opts_t const* opts)
 {
   if (!**reader)
     return false;
+
+  if (opts->ignore_whitespace_in_pat && isspace(**reader))
+  {
+    (*reader)++;
+    return true;
+  }
 
   if ((*reader)[1] == '-')
   {
@@ -123,7 +133,8 @@ bool tprec_lex(ReTk* tkOut, bool isOneOf, char const** reader)
           m = SP(SPECIAL_WORDC);
           m.invert = 1;
           break;
-        default: m = NO(c); break;
+        case ' ': m = NO(' '); break;
+        default:  m = NO(c); break;
       }
       tkOut->ty = Match;
       tkOut->match = m;
@@ -276,14 +287,18 @@ bool tprec_lex(ReTk* tkOut, bool isOneOf, char const** reader)
   return true;
 }
 
-int tprec_lexe(TkL* out, tpre_errs_t* errs, const char* src)
+int tprec_lexe(
+    TkL* out,
+    tpre_errs_t* errs,
+    const char* src,
+    tpre_opts_t const* opts)
 {
   memset(out, 0, sizeof(TkL));
 
   ReTk tok;
   const char* reader = src;
   bool isOneOf = false;
-  while (tprec_lex(&tok, isOneOf, &reader))
+  while (lex(&tok, isOneOf, &reader, opts))
   {
     tok.where = reader - src;
     tprec_TkL_add(out, tok);
