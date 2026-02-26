@@ -1603,6 +1603,11 @@ static void groups(
   groups(children[1], group, global_next_group_id, next_named_gr);
 }
 
+static bool isRepeatLeast0(NodeKind k)
+{
+  return k == NodeLazyRepeatLeast0 || k == NodeGreedyRepeatLeast0;
+}
+
 /** convert RepeatLeast1 to RepeatLeast0 */
 static void fix_0(Node* node)
 {
@@ -1828,6 +1833,28 @@ static void lower(
   }
 }
 
+/** get rid of outer of nested RepeatLeast0 */
+static void fix_3(Node* node)
+{
+  if (node == NULL)
+    return;
+  Node* children[2];
+  Node_children(node, children);
+
+  fix_3(children[0]);
+  fix_3(children[1]);
+
+  if (isRepeatLeast0(node->kind) &&
+      isRepeatLeast0(node->repeat->kind))
+  {
+    node->wherePlus1 = node->repeat->wherePlus1;
+    node->group = node->repeat->group;
+    Node* old = node->repeat;
+    node->repeat = node->repeat->repeat;
+    free(old);
+  }
+}
+
 static Node* leftmost(Node* node)
 {
   switch (node->kind)
@@ -1990,6 +2017,7 @@ int tpre_compile(
   fix_0(nd);
   fix_1(nd);
   fix_2(nd);
+  fix_3(nd);
   if (check_legal(errs_out, nd))
     status = 1;
 
