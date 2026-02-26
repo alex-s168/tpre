@@ -141,6 +141,7 @@ int main()
 
           size_t strl = strlen(str);
 
+          unsigned old_num_pass = num_pass;
           printf("pat: '%s' \t str: '%s': ", src, str);
           fflush(stdout);
           if (read_cmp_result(
@@ -155,7 +156,7 @@ int main()
             num_fail++;
           else
             num_pass++;
-          printf("done\n");
+          printf("done. pass: %u/2\n", num_pass - old_num_pass);
           fflush(stdout);
         }
 

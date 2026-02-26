@@ -21,6 +21,14 @@ test('test-char-classes', executable('test-char-classes',
   './tests/char_classes.c',
   dependencies: dep_tpre))
 
+test('test-repeats', executable('test-repeats',
+  './tests/repeats.c',
+  dependencies: dep_tpre))
+
+test('test-regression', executable('test-regression',
+  './tests/regression.c',
+  dependencies: dep_tpre))
+
 test('example', executable('example',
   'example.c',
   dependencies: dep_tpre))
